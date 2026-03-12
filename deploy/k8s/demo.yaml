@@ -1,0 +1,214 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: mdai-dd-fidelity-demo
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: otel-collector-config
+  namespace: mdai-dd-fidelity-demo
+data:
+  collector.yaml: |
+    receivers:
+      otlp:
+        protocols:
+          grpc:
+          http:
+      datadog:
+        endpoint: 0.0.0.0:8126
+    processors:
+      batch:
+      transform/add_correlation:
+        error_mode: ignore
+        trace_statements:
+          - context: resource
+            statements:
+              - set(resource.attributes["correlation_id"], resource.attributes["service.name"]) where resource.attributes["correlation_id"] == nil
+              - set(resource.attributes["fidelity.correlation_id"], resource.attributes["service.name"]) where resource.attributes["fidelity.correlation_id"] == nil
+        metric_statements:
+          - context: datapoint
+            statements:
+              - set(datapoint.attributes["correlation_id"], resource.attributes["service.name"]) where datapoint.attributes["correlation_id"] == nil
+              - set(datapoint.attributes["fidelity.correlation_id"], resource.attributes["service.name"]) where datapoint.attributes["fidelity.correlation_id"] == nil
+        log_statements:
+          - context: log
+            statements:
+              - set(log.attributes["correlation_id"], resource.attributes["service.name"]) where log.attributes["correlation_id"] == nil
+              - set(log.attributes["fidelity.correlation_id"], resource.attributes["service.name"]) where log.attributes["fidelity.correlation_id"] == nil
+    exporters:
+      datadog:
+        api:
+          site: datadoghq.local:8443
+          key: "00000000000000000000000000000000"
+          fail_on_invalid_key: false
+        host_metadata:
+          enabled: false
+        traces:
+          endpoint: http://127.0.0.1:8082
+        metrics:
+          endpoint: http://127.0.0.1:8082
+        logs:
+          endpoint: http://127.0.0.1:8082
+      debug:
+        verbosity: detailed
+    service:
+      pipelines:
+        traces:
+          receivers: [otlp, datadog]
+          processors: [transform/add_correlation, batch]
+          exporters: [debug,datadog]
+        metrics:
+          receivers: [otlp, datadog]
+          processors: [transform/add_correlation, batch]
+          exporters: [debug,datadog]
+        logs:
+          receivers: [otlp, datadog]
+          processors: [transform/add_correlation, batch]
+          exporters: [debug,datadog]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mdai-dd-fidelity-stack
+  namespace: mdai-dd-fidelity-demo
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mdai-dd-fidelity-stack
+  template:
+    metadata:
+      labels:
+        app: mdai-dd-fidelity-stack
+    spec:
+      hostAliases:
+        - ip: "127.0.0.1"
+          hostnames:
+            - "api.datadoghq.local"
+      containers:
+        - name: app
+          image: mdai-dd-fidelity-validator:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: admin
+              containerPort: 8080
+            - name: rx-proxy
+              containerPort: 8081
+            - name: tx-proxy
+              containerPort: 8082
+            - name: dd-api
+              containerPort: 8443
+          env:
+            - name: MDAI_ADMIN_ADDR
+              value: :8080
+            - name: MDAI_RECEIVER_PROXY_ADDR
+              value: :8081
+            - name: MDAI_EXPORTER_PROXY_ADDR
+              value: :8082
+            - name: MDAI_DATADOG_API_ADDR
+              value: :8443
+            - name: MDAI_DATADOG_API_TLS_HOSTS
+              value: api.datadoghq.local
+            - name: MDAI_RECEIVER_UPSTREAM
+              value: http://127.0.0.1:8126
+        - name: otelcol
+          image: otel/opentelemetry-collector-contrib:0.147.0
+          args:
+            - --config=/conf/collector.yaml
+          ports:
+            - containerPort: 4317
+            - containerPort: 4318
+            - containerPort: 8126
+          volumeMounts:
+            - name: collector-config
+              mountPath: /conf
+      volumes:
+        - name: collector-config
+          configMap:
+            name: otel-collector-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mdai-dd-fidelity-validator
+  namespace: mdai-dd-fidelity-demo
+spec:
+  selector:
+    app: mdai-dd-fidelity-stack
+  ports:
+    - name: admin
+      port: 8080
+      targetPort: 8080
+    - name: receiver-proxy
+      port: 8081
+      targetPort: 8081
+    - name: exporter-proxy
+      port: 8082
+      targetPort: 8082
+    - name: otlp-grpc
+      port: 4317
+      targetPort: 4317
+    - name: otlp-http
+      port: 4318
+      targetPort: 4318
+    - name: datadog
+      port: 8126
+      targetPort: 8126
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-config
+  namespace: mdai-dd-fidelity-demo
+data:
+  prometheus.yml: |
+    global:
+      scrape_interval: 10s
+    scrape_configs:
+      - job_name: validator
+        static_configs:
+          - targets: ["mdai-dd-fidelity-validator:8080"]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: prometheus
+  namespace: mdai-dd-fidelity-demo
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: prometheus
+  template:
+    metadata:
+      labels:
+        app: prometheus
+    spec:
+      containers:
+        - name: prometheus
+          image: prom/prometheus:v3.2.1
+          args:
+            - --config.file=/etc/prometheus/prometheus.yml
+          ports:
+            - containerPort: 9090
+          volumeMounts:
+            - name: prometheus-config
+              mountPath: /etc/prometheus
+      volumes:
+        - name: prometheus-config
+          configMap:
+            name: prometheus-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: prometheus
+  namespace: mdai-dd-fidelity-demo
+spec:
+  selector:
+    app: prometheus
+  ports:
+    - name: http
+      port: 9090
+      targetPort: 9090

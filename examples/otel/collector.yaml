@@ -1,0 +1,78 @@
+receivers:
+  otlp:
+    protocols:
+      grpc:
+      http:
+  datadog:
+    endpoint: 0.0.0.0:8126
+    read_timeout: 30s
+
+processors:
+  batch:
+  transform/add_correlation:
+    error_mode: ignore
+    trace_statements:
+      - context: resource
+        statements:
+          - set(resource.attributes["correlation_id"], resource.attributes["service.name"]) where resource.attributes["correlation_id"] == nil
+          - set(resource.attributes["fidelity.correlation_id"], resource.attributes["service.name"]) where resource.attributes["fidelity.correlation_id"] == nil
+    metric_statements:
+      - context: datapoint
+        statements:
+          - set(datapoint.attributes["correlation_id"], resource.attributes["service.name"]) where datapoint.attributes["correlation_id"] == nil
+          - set(datapoint.attributes["fidelity.correlation_id"], resource.attributes["service.name"]) where datapoint.attributes["fidelity.correlation_id"] == nil
+    log_statements:
+      - context: log
+        statements:
+          - set(log.attributes["correlation_id"], resource.attributes["service.name"]) where log.attributes["correlation_id"] == nil
+          - set(log.attributes["fidelity.correlation_id"], resource.attributes["service.name"]) where log.attributes["fidelity.correlation_id"] == nil
+
+exporters:
+  datadog:
+    api:
+      site: datadoghq.local:8443
+      key: ${env:DD_API_KEY}
+      fail_on_invalid_key: false
+      tls:
+        insecure_skip_verify: true
+    host_metadata:
+      enabled: false
+    traces:
+      endpoint: http://127.0.0.1:8082
+    metrics:
+      endpoint: http://127.0.0.1:8082
+    logs:
+      endpoint: http://127.0.0.1:8082
+
+extensions:
+  health_check:
+
+service:
+  extensions: [health_check]
+  pipelines:
+    traces:
+      receivers: [otlp, datadog]
+      processors: [transform/add_correlation, batch]
+      exporters: [datadog]
+    metrics:
+      receivers: [otlp, datadog]
+      processors: [transform/add_correlation, batch]
+      exporters: [datadog]
+    logs:
+      receivers: [otlp, datadog]
+      processors: [transform/add_correlation, batch]
+      exporters: [datadog]
+
+# Notes:
+# 1. Send Datadog client or agent traffic to `http://mdai-dd-fidelity-validator:8081`.
+#    The validator captures the raw Datadog ingress payload, then forwards it to
+#    this collector's Datadog receiver on port 8126.
+# 2. The Datadog exporter sends its raw egress payloads to `http://127.0.0.1:8082`.
+#    The validator captures that egress payload and can optionally forward it onward if
+#    `MDAI_EXPORTER_UPSTREAM` is configured.
+# 3. The Datadog API validation call is redirected to the validator's local TLS listener
+#    by setting `site: datadoghq.local:8443` and making `api.datadoghq.local` resolve to 127.0.0.1.
+# 4. The transform processor injects both `correlation_id` and `fidelity.correlation_id`
+#    so the validator can pair ingress and egress observations deterministically.
+# 5. The OTLP receiver is present only so `telemetrygen` can drive the collector. OTLP traffic
+#    does not exercise raw Datadog ingress fidelity because it bypasses the receiver-side proxy.
