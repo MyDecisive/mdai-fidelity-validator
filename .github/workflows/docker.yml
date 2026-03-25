@@ -11,4 +11,3 @@ jobs:
     uses: MyDecisive/ci/.github/workflows/docker-ghcr.yaml@main
     secrets:
       SLACK_NOTIFY_URL: ${{ secrets.SLACK_NOTIFY_URL }}
-      AWS_ROLE_TO_ASSUME: ${{ secrets.AWS_ROLE_TO_ASSUME }}
