@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -21,6 +22,13 @@ const (
 	EncodingMsgpack Encoding = "msgpack"
 )
 
+type ContentType string
+
+const (
+	ContentTypeJSON    ContentType = "application/json"
+	ContentTypeMsgpack ContentType = "application/msgpack"
+)
+
 type Signal string
 
 const (
@@ -29,10 +37,16 @@ const (
 	SignalLogs    Signal = "logs"
 )
 
+type ContentEncoding string
+
+const (
+	ContentEncodingGzip ContentEncoding = "gzip"
+)
+
 type Request struct {
 	Path            string
-	ContentType     string
-	ContentEncoding string
+	ContentType     ContentType
+	ContentEncoding ContentEncoding
 	Body            []byte
 	CorrelationID   string
 	Service         string
@@ -59,13 +73,13 @@ func BuildRequest(opts Options) (Request, error) {
 		return Request{}, err
 	}
 
-	contentEncoding := ""
+	var contentEncoding ContentEncoding
 	if opts.Gzip {
 		body, err = gzipBytes(body)
 		if err != nil {
 			return Request{}, err
 		}
-		contentEncoding = "gzip"
+		contentEncoding = ContentEncodingGzip
 	}
 
 	return Request{
@@ -94,13 +108,13 @@ func BuildRequestWithCorrelation(opts Options, correlationID string, dropAttrPro
 		return Request{}, err
 	}
 
-	contentEncoding := ""
+	var contentEncoding ContentEncoding
 	if opts.Gzip {
 		body, err = gzipBytes(body)
 		if err != nil {
 			return Request{}, err
 		}
-		contentEncoding = "gzip"
+		contentEncoding = ContentEncodingGzip
 	}
 
 	return Request{
@@ -114,7 +128,7 @@ func BuildRequestWithCorrelation(opts Options, correlationID string, dropAttrPro
 	}, nil
 }
 
-func buildPayload(opts Options, fixedCorrelationID ...string) (any, string, string, string, error) {
+func buildPayload(opts Options, fixedCorrelationID ...string) (any, string, string, ContentType, error) {
 	correlationID := "corr-" + randomHex(8)
 	if len(fixedCorrelationID) > 0 && fixedCorrelationID[0] != "" {
 		correlationID = fixedCorrelationID[0]
@@ -131,31 +145,31 @@ func buildPayload(opts Options, fixedCorrelationID ...string) (any, string, stri
 
 	var (
 		path        string
-		contentType string
+		contentType ContentType
 		payload     any
 	)
 
 	switch opts.Signal {
 	case SignalTraces:
 		path = "/v0.4/traces"
-		contentType = "application/json"
+		contentType = ContentTypeJSON
 		payload = buildTracePayload(opts.Service, opts.Environment, opts.Host, correlationID)
 		if opts.Encoding == EncodingMsgpack {
-			contentType = "application/msgpack"
+			contentType = ContentTypeMsgpack
 		}
 	case SignalMetrics:
 		if opts.Encoding == EncodingMsgpack {
-			return nil, "", "", "", fmt.Errorf("metrics payloads currently support only json encoding")
+			return nil, "", "", "", errors.New("metrics payloads currently support only json encoding")
 		}
 		path = "/api/v1/series"
-		contentType = "application/json"
+		contentType = ContentTypeJSON
 		payload = buildMetricsPayload(opts.Service, opts.Environment, opts.Host, correlationID)
 	case SignalLogs:
 		path = "/api/v2/logs"
-		contentType = "application/json"
+		contentType = ContentTypeJSON
 		payload = buildLogsPayload(opts.Service, opts.Environment, opts.Host, correlationID)
 		if opts.Encoding == EncodingMsgpack {
-			contentType = "application/msgpack"
+			contentType = ContentTypeMsgpack
 		}
 	default:
 		return nil, "", "", "", fmt.Errorf("unsupported signal %q", opts.Signal)
@@ -250,7 +264,7 @@ func buildLogsPayload(service, env, host, correlationID string) any {
 		"message":        "ddgen synthetic log event",
 		"service":        service,
 		"hostname":       host,
-		"ddsource":       "mdai-dd-fidelity-validator",
+		"ddsource":       "mdai-fidelity-validator",
 		"ddtags":         "env:" + env + ",correlation_id:" + correlationID + ",fidelity.correlation_id:" + correlationID,
 		"status":         "info",
 		"timestamp":      time.Now().UTC().UnixMilli(),
@@ -362,6 +376,7 @@ func mutatePayloadForDrop(signal Signal, payload any, probability float64) {
 		if attrs, ok := logPayload["attributes"].(map[string]any); ok {
 			dropMapKeys(attrs, probability, protectedCorrelationKeys())
 		}
+	default:
 	}
 }
 

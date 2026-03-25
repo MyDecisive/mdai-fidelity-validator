@@ -1,0 +1,23 @@
+signals:
+  metrics:
+    required_attributes:
+      - metric_name
+      - correlation_id
+      - fidelity_correlation_id
+      - service
+      - env
+      - point_timestamp
+      - point_value
+  traces:
+    required_attributes:
+      - trace_id
+      - span_count
+      - correlation_id
+      - fidelity_correlation_id
+      - service
+  logs:
+    required_attributes:
+      - message
+      - correlation_id
+      - fidelity_correlation_id
+      - service

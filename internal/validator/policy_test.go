@@ -5,7 +5,7 @@ import "testing"
 func TestExtractLogAttributeFromWrappedExporterLog(t *testing.T) {
 	fields := map[string]string{
 		"[0].ddtags":  "env:dev,correlation_id:corr-1,fidelity.correlation_id:corr-1,otel_source:datadog_exporter",
-		"[0].message": `{"ddsource":"mdai-dd-fidelity-validator","hostname":"localhost","message":"ddgen synthetic log event","service":"ddgen-svc","status":"info","timestamp":1773343955346}`,
+		"[0].message": `{"ddsource":"mdai-fidelity-validator","hostname":"localhost","message":"ddgen synthetic log event","service":"ddgen-svc","status":"info","timestamp":1773343955346}`,
 	}
 
 	service, ok := extractLogAttribute("service", fields)
@@ -63,6 +63,40 @@ func TestExtractTraceAttributesFromReceiverAndExporterShapes(t *testing.T) {
 		spanCount, ok := extractTraceAttribute("span_count", tc.fields)
 		if !ok || spanCount != "2" {
 			t.Fatalf("%s span_count=%q ok=%v", tc.name, spanCount, ok)
+		}
+	}
+}
+
+func TestEvaluatePolicyLogsSemanticMatch(t *testing.T) {
+	receiver := map[string]string{
+		"message":                 "ddgen synthetic log event",
+		"service":                 "ddgen-svc",
+		"correlation_id":          "corr-1",
+		"fidelity.correlation_id": "corr-1",
+	}
+	exporter := map[string]string{
+		"[0].ddtags":  "env:dev,correlation_id:corr-1,fidelity.correlation_id:corr-1,otel_source:datadog_exporter",
+		"[0].message": `{"message":"ddgen synthetic log event","service":"ddgen-svc"}`,
+	}
+
+	policy := Policy{
+		Signals: map[Signal]SignalPolicy{
+			"logs": {
+				RequiredAttributes: []string{"message", "correlation_id", "fidelity_correlation_id", "service"},
+			},
+		},
+	}
+
+	checks, passed := evaluatePolicy("logs", receiver, exporter, policy)
+	if !passed {
+		t.Fatalf("expected policy to pass; checks=%+v", checks)
+	}
+	if len(checks) != 4 {
+		t.Fatalf("expected 4 checks, got %d", len(checks))
+	}
+	for _, check := range checks {
+		if !check.Passed {
+			t.Fatalf("expected check %q to pass, got %+v", check.Attribute, check)
 		}
 	}
 }

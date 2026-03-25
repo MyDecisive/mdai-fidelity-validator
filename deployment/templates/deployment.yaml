@@ -1,0 +1,70 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Values.deployment.name }}
+  namespace: {{ .Release.Namespace }}
+  {{- with .Values.deployment.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  replicas: {{ .Values.deployment.replicas }}
+  selector:
+    matchLabels:
+      app: {{ .Values.deployment.name }}
+  template:
+    metadata:
+      labels:
+        app: {{ .Values.deployment.name }}
+      {{- with .Values.deployment.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      {{- if .Values.serviceAccount.create }}
+      serviceAccountName: {{ default .Values.deployment.name .Values.serviceAccount.name }}
+      {{- end }}
+      {{- with .Values.deployment.hostAliases }}
+      hostAliases:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.deployment.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.deployment.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.deployment.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: app
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: admin
+              containerPort: 8080
+            - name: ingest
+              containerPort: 8126
+            - name: dd-api
+              containerPort: 8081
+          env:
+            - name: MDAI_ADMIN_ADDR
+              value: {{ .Values.env.adminAddr | quote }}
+            - name: MDAI_INGEST_ADDR
+              value: {{ .Values.env.ingestAddr | quote }}
+            - name: MDAI_DATADOG_API_ADDR
+              value: {{ .Values.env.datadogAPIAddr | quote }}
+            - name: MDAI_RETENTION
+              value: {{ .Values.env.retention | quote }}
+            {{- if .Values.env.receiverUpstream }}
+            - name: MDAI_RECEIVER_UPSTREAM
+              value: {{ .Values.env.receiverUpstream | quote }}
+            {{- end }}
+            {{- if .Values.env.exporterUpstream }}
+            - name: MDAI_EXPORTER_UPSTREAM
+              value: {{ .Values.env.exporterUpstream | quote }}
+            {{- end }}

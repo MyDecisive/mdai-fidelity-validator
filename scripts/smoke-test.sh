@@ -56,7 +56,7 @@ run_signal() {
 
   echo "timed out waiting for ${signal} comparison at ${result_path}" >&2
   echo "current metrics snapshot:" >&2
-  curl -fsS "${VALIDATOR_ADMIN_URL}/metrics" | grep 'mdai_dd_fidelity' >&2 || true
+  curl -fsS "${VALIDATOR_ADMIN_URL}/metrics" | grep 'mdai_fidelity' >&2 || true
   return 1
 }
 
@@ -65,5 +65,5 @@ run_signal traces
 run_signal metrics
 run_signal logs
 
-#echo "== prometheus metrics"
-#curl -fsS "${VALIDATOR_ADMIN_URL}/metrics" | grep 'mdai_dd_fidelity'
+echo "== prometheus metrics"
+curl -fsS "${VALIDATOR_ADMIN_URL}/metrics" | grep 'mdai_fidelity'
