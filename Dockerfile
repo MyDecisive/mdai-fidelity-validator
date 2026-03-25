@@ -1,5 +1,4 @@
 # syntax=docker/dockerfile:1
-LABEL org.opencontainers.image.source https://github.com/mydecisive/mdai-fidelity-validator
 ARG GO_VERSION=1.25
 FROM --platform=$BUILDPLATFORM golang:${GO_VERSION}-bookworm AS builder
 ARG TARGETOS=linux
