@@ -20,7 +20,7 @@ func TestBuildRequestJSON(t *testing.T) {
 	if req.Path != "/api/v1/series" {
 		t.Fatalf("unexpected path %q", req.Path)
 	}
-	if req.ContentType != "application/json" {
+	if req.ContentType != ContentTypeJSON {
 		t.Fatalf("unexpected content type %q", req.ContentType)
 	}
 
@@ -42,10 +42,10 @@ func TestBuildRequestMsgpack(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BuildRequest error: %v", err)
 	}
-	if req.ContentType != "application/msgpack" {
+	if req.ContentType != ContentTypeMsgpack {
 		t.Fatalf("unexpected content type %q", req.ContentType)
 	}
-	if req.ContentEncoding != "gzip" {
+	if req.ContentEncoding != ContentEncodingGzip {
 		t.Fatalf("unexpected content encoding %q", req.ContentEncoding)
 	}
 }

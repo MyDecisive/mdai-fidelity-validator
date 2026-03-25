@@ -9,12 +9,13 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"net/url"
-	"sort"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -29,15 +30,24 @@ import (
 	"github.com/vmihailenco/msgpack/v5"
 )
 
+const numShards = 32
+
+type shard struct {
+	mu         sync.Mutex
+	pending    map[string]*observedPayload
+	lastResult map[string]ComparisonResult
+}
+
 type Service struct {
-	mu           sync.Mutex
-	retention    time.Duration
-	pending      map[string]*observedPayload
-	lastResult   map[string]ComparisonResult
+	shards     []*shard
+	retention  time.Duration
+	httpClient *http.Client
+	policy     Policy
+
+	// Registry lock for global lookups/debug
+	regMu        sync.Mutex
 	lastBySource map[string]*observedPayload
 	lastByKey    map[string]*observedPayload
-	httpClient   *http.Client
-	policy       Policy
 
 	receiverUpstream *url.URL
 	exporterUpstream *url.URL
@@ -52,20 +62,23 @@ type Service struct {
 
 type observedPayload struct {
 	source      string
-	signal      string
+	signal      Signal
 	correlation string
 	receivedAt  time.Time
 	body        []byte
 	format      string
+	decodeError string
 	request     RequestSnapshot
 	flattened   map[string]string
 }
 
 type ComparisonResult struct {
-	Signal            string                   `json:"signal"`
+	Signal            Signal                   `json:"signal"`
 	CorrelationID     string                   `json:"correlation_id"`
 	ReceiverFields    map[string]string        `json:"receiver_fields,omitempty"`
 	ExporterFields    map[string]string        `json:"exporter_fields,omitempty"`
+	ReceiverRawFields map[string]string        `json:"receiver_raw_fields,omitempty"`
+	ExporterRawFields map[string]string        `json:"exporter_raw_fields,omitempty"`
 	Passed            bool                     `json:"passed"`
 	FullPayloadPassed bool                     `json:"full_payload_passed"`
 	AttributeTotal    int                      `json:"attribute_total"`
@@ -73,8 +86,8 @@ type ComparisonResult struct {
 	Mismatched        []AttributeDelta         `json:"mismatched,omitempty"`
 	MissingIn         []MissingField           `json:"missing_in,omitempty"`
 	RequiredChecks    []RequiredAttributeCheck `json:"required_checks,omitempty"`
-	ReceiverWire      RequestSnapshot          `json:"receiver_wire,omitempty"`
-	ExporterWire      RequestSnapshot          `json:"exporter_wire,omitempty"`
+	ReceiverWire      RequestSnapshot          `json:"receiver_wire"`
+	ExporterWire      RequestSnapshot          `json:"exporter_wire"`
 	ComparedAt        time.Time                `json:"compared_at"`
 }
 
@@ -91,18 +104,20 @@ type MissingField struct {
 }
 
 type RequestSnapshot struct {
+	Listener        string            `json:"listener,omitempty"`
 	Method          string            `json:"method,omitempty"`
 	Path            string            `json:"path,omitempty"`
 	Query           string            `json:"query,omitempty"`
 	ContentType     string            `json:"content_type,omitempty"`
 	ContentEncoding string            `json:"content_encoding,omitempty"`
 	Format          string            `json:"format,omitempty"`
+	DecodeError     string            `json:"decode_error,omitempty"`
 	Headers         map[string]string `json:"headers,omitempty"`
 }
 
 type DebugPayload struct {
 	Source        string            `json:"source"`
-	Signal        string            `json:"signal"`
+	Signal        Signal            `json:"signal"`
 	CorrelationID string            `json:"correlation_id"`
 	ReceivedAt    time.Time         `json:"received_at"`
 	Format        string            `json:"format"`
@@ -120,15 +135,15 @@ func NewService(retention time.Duration, receiverUpstream, exporterUpstream stri
 	if err != nil {
 		return nil, fmt.Errorf("invalid exporter upstream: %w", err)
 	}
-	policy, err := loadPolicy()
+	policy, policySource, err := loadPolicy()
 	if err != nil {
 		return nil, fmt.Errorf("load policy: %w", err)
 	}
+	log.Printf("loaded fidelity policy source=%s summary=%s", policySource, summarizePolicy(policy))
 
 	svc := &Service{
+		shards:           make([]*shard, numShards),
 		retention:        retention,
-		pending:          make(map[string]*observedPayload),
-		lastResult:       make(map[string]ComparisonResult),
 		lastBySource:     make(map[string]*observedPayload),
 		lastByKey:        make(map[string]*observedPayload),
 		httpClient:       &http.Client{Timeout: 30 * time.Second},
@@ -136,29 +151,36 @@ func NewService(retention time.Duration, receiverUpstream, exporterUpstream stri
 		receiverUpstream: receiverURL,
 		exporterUpstream: exporterURL,
 		receivedTotal: promauto.NewCounterVec(prometheus.CounterOpts{
-			Name: "mdai_dd_fidelity_payloads_received_total",
+			Name: "mdai_fidelity_payloads_received_total",
 			Help: "Number of payloads received by source and signal.",
 		}, []string{"source", "signal"}),
 		attributeEval: promauto.NewCounterVec(prometheus.CounterOpts{
-			Name: "mdai_dd_fidelity_attribute_checks_total",
+			Name: "mdai_fidelity_attribute_checks_total",
 			Help: "Number of attribute comparisons by signal, attribute, and result.",
 		}, []string{"signal", "attribute", "result"}),
 		signalEval: promauto.NewCounterVec(prometheus.CounterOpts{
-			Name: "mdai_dd_fidelity_signal_checks_total",
+			Name: "mdai_fidelity_signal_checks_total",
 			Help: "Number of whole-signal comparisons by signal and result.",
 		}, []string{"signal", "result"}),
 		requiredEval: promauto.NewCounterVec(prometheus.CounterOpts{
-			Name: "mdai_dd_fidelity_required_attribute_checks_total",
+			Name: "mdai_fidelity_required_attribute_checks_total",
 			Help: "Number of required attribute comparisons by signal, attribute, and result.",
 		}, []string{"signal", "attribute", "result"}),
 		requiredSig: promauto.NewCounterVec(prometheus.CounterOpts{
-			Name: "mdai_dd_fidelity_required_signal_checks_total",
+			Name: "mdai_fidelity_required_signal_checks_total",
 			Help: "Number of policy-based whole-signal comparisons by signal and result.",
 		}, []string{"signal", "result"}),
 		pendingGauge: promauto.NewGauge(prometheus.GaugeOpts{
-			Name: "mdai_dd_fidelity_pending_payloads",
+			Name: "mdai_fidelity_pending_payloads",
 			Help: "Number of payloads waiting for their correlated counterpart.",
 		}),
+	}
+
+	for i := range numShards {
+		svc.shards[i] = &shard{
+			pending:    make(map[string]*observedPayload),
+			lastResult: make(map[string]ComparisonResult),
+		}
 	}
 
 	return svc, nil
@@ -179,9 +201,9 @@ func (s *Service) AdminRoutes() http.Handler {
 	return mux
 }
 
-func (s *Service) ProxyRoutes(source string) http.Handler {
+func (s *Service) IngestRoutes() http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/", s.handleProxySource(source))
+	mux.HandleFunc("/", s.handleProxyIngest)
 	return mux
 }
 
@@ -192,7 +214,7 @@ func (s *Service) DatadogAPIRoutes() http.Handler {
 	return mux
 }
 
-func (s *Service) handleHealth(w http.ResponseWriter, _ *http.Request) {
+func (*Service) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte("ok\n"))
 }
@@ -204,9 +226,10 @@ func (s *Service) handleResults(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.mu.Lock()
-	result, ok := s.lastResult[correlationID]
-	s.mu.Unlock()
+	sh := s.getShard(correlationID)
+	sh.mu.Lock()
+	result, ok := sh.lastResult[correlationID]
+	sh.mu.Unlock()
 	if !ok {
 		http.Error(w, "result not found", http.StatusNotFound)
 		return
@@ -216,18 +239,28 @@ func (s *Service) handleResults(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Service) handleDebugPending(w http.ResponseWriter, _ *http.Request) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	pending := make([]DebugPayload, 0, len(s.pending))
-	for _, payload := range s.pending {
-		pending = append(pending, debugPayloadFromObserved(payload))
-	}
-	sort.Slice(pending, func(i, j int) bool {
-		if pending[i].ReceivedAt.Equal(pending[j].ReceivedAt) {
-			return pending[i].CorrelationID < pending[j].CorrelationID
+	var pending []DebugPayload
+	for _, sh := range s.shards {
+		sh.mu.Lock()
+		for _, payload := range sh.pending {
+			pending = append(pending, debugPayloadFromObserved(payload))
 		}
-		return pending[i].ReceivedAt.Before(pending[j].ReceivedAt)
+		sh.mu.Unlock()
+	}
+
+	slices.SortFunc(pending, func(a, b DebugPayload) int {
+		switch {
+		case a.ReceivedAt.Before(b.ReceivedAt):
+			return -1
+		case a.ReceivedAt.After(b.ReceivedAt):
+			return 1
+		case a.CorrelationID < b.CorrelationID:
+			return -1
+		case a.CorrelationID > b.CorrelationID:
+			return 1
+		default:
+			return 0
+		}
 	})
 
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -243,9 +276,9 @@ func (s *Service) handleDebugLast(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.mu.Lock()
+	s.regMu.Lock()
 	payload, ok := s.lastBySource[source]
-	s.mu.Unlock()
+	s.regMu.Unlock()
 	if !ok {
 		http.Error(w, "not found", http.StatusNotFound)
 		return
@@ -261,9 +294,9 @@ func (s *Service) handleDebugLastSignal(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	s.mu.Lock()
+	s.regMu.Lock()
 	payload, ok := s.lastByKey[parts[0]+":"+parts[1]]
-	s.mu.Unlock()
+	s.regMu.Unlock()
 	if !ok {
 		http.Error(w, "not found", http.StatusNotFound)
 		return
@@ -273,19 +306,25 @@ func (s *Service) handleDebugLastSignal(w http.ResponseWriter, r *http.Request) 
 }
 
 func (s *Service) handleDebugResults(w http.ResponseWriter, _ *http.Request) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	keys := make([]string, 0, len(s.lastResult))
-	for key := range s.lastResult {
-		keys = append(keys, key)
+	var results []ComparisonResult
+	for _, sh := range s.shards {
+		sh.mu.Lock()
+		for _, result := range sh.lastResult {
+			results = append(results, result)
+		}
+		sh.mu.Unlock()
 	}
-	sort.Strings(keys)
 
-	results := make([]ComparisonResult, 0, len(keys))
-	for _, key := range keys {
-		results = append(results, s.lastResult[key])
-	}
+	slices.SortFunc(results, func(a, b ComparisonResult) int {
+		switch {
+		case a.ComparedAt.Before(b.ComparedAt):
+			return -1
+		case a.ComparedAt.After(b.ComparedAt):
+			return 1
+		default:
+			return 0
+		}
+	})
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"count":   len(results),
@@ -294,16 +333,42 @@ func (s *Service) handleDebugResults(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (s *Service) handleDatadogValidate(w http.ResponseWriter, r *http.Request) {
+	s.captureDatadogAPIRequest(":8443", r)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"valid": true,
 	})
 }
 
 func (s *Service) handleDatadogAPI(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{
-		"emulated": true,
-		"path":     r.URL.Path,
-	})
+	path := readRequestPath(r)
+	signal := inferSignalFromDatadogPath(path)
+	if signal != "unknown" {
+		observed, _, _, err := s.captureRequest("exporter", signal, ":8081", path, r)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		if s.exporterUpstream == nil {
+			writeDatadogAck(w, signal)
+			return
+		}
+
+		resp, err := s.forwardRaw(r.Context(), s.exporterUpstream, path, r.URL.RawQuery, r.Method, r.Header, observed.body)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("forwarding failed: %v", err), http.StatusBadGateway)
+			return
+		}
+		defer resp.Body.Close() //nolint:errcheck
+
+		copyResponse(w, resp)
+		return
+	}
+
+	//nolint:gosec // debug log for unsupported paths; request details are intentionally logged.
+	log.Printf("rejected datadog-api request listener=%s method=%s path=%s reason=%q headers=%v",
+		":8081", r.Method, path, "unsupported path on datadog-api listener", selectedHeaders(r.Header))
+	http.Error(w, "unsupported path", http.StatusNotFound)
 }
 
 func (s *Service) handleSource(source string) http.HandlerFunc {
@@ -314,7 +379,7 @@ func (s *Service) handleSource(source string) http.HandlerFunc {
 			return
 		}
 
-		observed, result, matched, err := s.captureRequest(source, signal, readRequestPath(r), r)
+		observed, result, matched, err := s.captureRequest(source, Signal(signal), "admin", readRequestPath(r), r)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
@@ -328,6 +393,9 @@ func (s *Service) handleSource(source string) http.HandlerFunc {
 			"attributes":     observed.flattened,
 			"matched":        matched,
 		}
+		if observed.decodeError != "" {
+			response["decode_error"] = observed.decodeError
+		}
 		if result != nil {
 			response["comparison"] = result
 		}
@@ -336,102 +404,122 @@ func (s *Service) handleSource(source string) http.HandlerFunc {
 	}
 }
 
-func (s *Service) handleProxySource(source string) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		path := readRequestPath(r)
-		signal := inferSignalFromDatadogPath(path)
-		_, _, _, err := s.captureRequest(source, signal, path, r)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-
-		upstream := s.receiverUpstream
-		if source == "exporter" {
-			upstream = s.exporterUpstream
-		}
-		if upstream == nil {
-			writeDatadogAck(w, signal)
-			return
-		}
-
-		resp, err := s.forwardRaw(r.Context(), upstream, path, r.URL.RawQuery, r.Method, r.Header, mustReadBodyBytes(r))
-		if err != nil {
-			http.Error(w, fmt.Sprintf("forwarding failed: %v", err), http.StatusBadGateway)
-			return
-		}
-		defer resp.Body.Close()
-
-		copyResponse(w, resp)
+func (s *Service) handleProxyIngest(w http.ResponseWriter, r *http.Request) {
+	path := readRequestPath(r)
+	signal := inferSignalFromDatadogPath(path)
+	observed, _, _, err := s.captureRequest("receiver", signal, ":8126", path, r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
 	}
+
+	upstream := s.receiverUpstream
+	if upstream == nil {
+		writeDatadogAck(w, signal)
+		return
+	}
+
+	resp, err := s.forwardRaw(r.Context(), upstream, path, r.URL.RawQuery, r.Method, r.Header, observed.body)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("forwarding failed: %v", err), http.StatusBadGateway)
+		return
+	}
+	defer resp.Body.Close() //nolint:errcheck
+
+	copyResponse(w, resp)
+}
+
+func (s *Service) getShard(correlationID string) *shard {
+	hash := sha256.Sum256([]byte(correlationID))
+	index := int(hash[0]) % numShards
+	return s.shards[index]
 }
 
 func (s *Service) observe(payload *observedPayload) (*ComparisonResult, bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	sh := s.getShard(payload.correlation)
+	sh.mu.Lock()
+	defer sh.mu.Unlock()
 
-	s.gcLocked(time.Now().UTC())
-	s.lastBySource[payload.source] = payload
-	s.lastByKey[payload.source+":"+payload.signal] = payload
+	s.gcShardLocked(sh, time.Now().UTC())
+	s.rememberObserved(payload)
 
-	if existing, ok := s.pending[payload.correlation]; ok {
+	if existing, ok := sh.pending[payload.correlation]; ok {
 		if existing.source == payload.source {
-			s.pending[payload.correlation] = payload
-			s.pendingGauge.Set(float64(len(s.pending)))
+			sh.pending[payload.correlation] = payload
+			s.updatePendingGauge()
 			return nil, false
 		}
 
-		delete(s.pending, payload.correlation)
-		s.pendingGauge.Set(float64(len(s.pending)))
+		delete(sh.pending, payload.correlation)
+		s.updatePendingGauge()
 
 		result := comparePair(existing, payload, s.policy)
-		s.lastResult[payload.correlation] = result
+		sh.lastResult[payload.correlation] = result
 		s.recordMetrics(result)
 		return &result, true
 	}
 
-	s.pending[payload.correlation] = payload
-	s.pendingGauge.Set(float64(len(s.pending)))
+	sh.pending[payload.correlation] = payload
+	s.updatePendingGauge()
 	return nil, false
 }
 
-func (s *Service) gcLocked(now time.Time) {
-	for key, payload := range s.pending {
+func (s *Service) rememberObserved(payload *observedPayload) {
+	s.regMu.Lock()
+	defer s.regMu.Unlock()
+	s.lastBySource[payload.source] = payload
+	s.lastByKey[payload.source+":"+string(payload.signal)] = payload
+}
+
+func (s *Service) gcShardLocked(sh *shard, now time.Time) {
+	for key, payload := range sh.pending {
 		if now.Sub(payload.receivedAt) > s.retention {
-			delete(s.pending, key)
+			delete(sh.pending, key)
 		}
 	}
-	s.pendingGauge.Set(float64(len(s.pending)))
+	for key, result := range sh.lastResult {
+		if now.Sub(result.ComparedAt) > s.retention {
+			delete(sh.lastResult, key)
+		}
+	}
+}
+
+func (s *Service) updatePendingGauge() {
+	var total int
+	for _, sh := range s.shards {
+		total += len(sh.pending)
+	}
+	s.pendingGauge.Set(float64(total))
 }
 
 func (s *Service) recordMetrics(result ComparisonResult) {
 	for _, attribute := range result.Matched {
-		s.attributeEval.WithLabelValues(result.Signal, attribute, "pass").Inc()
+		s.attributeEval.WithLabelValues(string(result.Signal), attribute, "pass").Inc()
 	}
 	for _, delta := range result.Mismatched {
-		s.attributeEval.WithLabelValues(result.Signal, delta.Attribute, "fail").Inc()
+		s.attributeEval.WithLabelValues(string(result.Signal), delta.Attribute, "fail").Inc()
 	}
 	for _, missing := range result.MissingIn {
-		s.attributeEval.WithLabelValues(result.Signal, missing.Attribute, "fail").Inc()
+		s.attributeEval.WithLabelValues(string(result.Signal), missing.Attribute, "fail").Inc()
 	}
 
 	if result.FullPayloadPassed {
-		s.signalEval.WithLabelValues(result.Signal, "pass").Inc()
+		s.signalEval.WithLabelValues(string(result.Signal), "pass").Inc()
 	} else {
-		s.signalEval.WithLabelValues(result.Signal, "fail").Inc()
+		s.signalEval.WithLabelValues(string(result.Signal), "fail").Inc()
 	}
 
 	if result.Passed {
-		s.requiredSig.WithLabelValues(result.Signal, "pass").Inc()
+		s.requiredSig.WithLabelValues(string(result.Signal), "pass").Inc()
 	} else {
-		s.requiredSig.WithLabelValues(result.Signal, "fail").Inc()
+		s.requiredSig.WithLabelValues(string(result.Signal), "fail").Inc()
 	}
 	for _, check := range result.RequiredChecks {
 		resultLabel := "fail"
 		if check.Passed {
 			resultLabel = "pass"
 		}
-		s.requiredEval.WithLabelValues(result.Signal, check.Attribute, resultLabel).Inc()
+		s.requiredEval.WithLabelValues(string(result.Signal), check.Attribute, resultLabel).Inc()
 	}
 }
 
@@ -442,21 +530,26 @@ func comparePair(a, b *observedPayload, policy Policy) ComparisonResult {
 		receiver, exporter = exporter, receiver
 	}
 
+	receiverCompareFields := normalizeFieldsForComparison(receiver.signal, receiver.flattened)
+	exporterCompareFields := normalizeFieldsForComparison(receiver.signal, exporter.flattened)
+
 	result := ComparisonResult{
-		Signal:         receiver.signal,
-		CorrelationID:  receiver.correlation,
-		ReceiverFields: receiver.flattened,
-		ExporterFields: exporter.flattened,
-		ReceiverWire:   receiver.request,
-		ExporterWire:   exporter.request,
-		ComparedAt:     time.Now().UTC(),
+		Signal:            receiver.signal,
+		CorrelationID:     receiver.correlation,
+		ReceiverFields:    receiverCompareFields,
+		ExporterFields:    exporterCompareFields,
+		ReceiverRawFields: receiver.flattened,
+		ExporterRawFields: exporter.flattened,
+		ReceiverWire:      receiver.request,
+		ExporterWire:      exporter.request,
+		ComparedAt:        time.Now().UTC(),
 	}
 
-	allKeysMap := make(map[string]struct{}, len(receiver.flattened)+len(exporter.flattened))
-	for key := range receiver.flattened {
+	allKeysMap := make(map[string]struct{}, len(receiverCompareFields)+len(exporterCompareFields))
+	for key := range receiverCompareFields {
 		allKeysMap[key] = struct{}{}
 	}
-	for key := range exporter.flattened {
+	for key := range exporterCompareFields {
 		allKeysMap[key] = struct{}{}
 	}
 
@@ -464,11 +557,11 @@ func comparePair(a, b *observedPayload, policy Policy) ComparisonResult {
 	for key := range allKeysMap {
 		allKeys = append(allKeys, key)
 	}
-	sort.Strings(allKeys)
+	slices.Sort(allKeys)
 
 	for _, key := range allKeys {
-		receiverValue, receiverOK := receiver.flattened[key]
-		exporterValue, exporterOK := exporter.flattened[key]
+		receiverValue, receiverOK := receiverCompareFields[key]
+		exporterValue, exporterOK := exporterCompareFields[key]
 
 		switch {
 		case receiverOK && exporterOK && receiverValue == exporterValue:
@@ -500,7 +593,25 @@ func comparePair(a, b *observedPayload, policy Policy) ComparisonResult {
 	return result
 }
 
-func (s *Service) captureRequest(source, signal, path string, r *http.Request) (*observedPayload, *ComparisonResult, bool, error) {
+func normalizeFieldsForComparison(signal Signal, fields map[string]string) map[string]string {
+	normalized := make(map[string]string, len(fields))
+	for key, value := range fields {
+		normalized[normalizeFieldKeyForComparison(signal, key)] = value
+	}
+	return normalized
+}
+
+func normalizeFieldKeyForComparison(signal Signal, key string) string {
+	// Logs from datadogexporter often arrive as a single-item array payload:
+	// [0].message, [0].service, [0].ddtags, etc.
+	// Normalize that wrapper so receiver-side "message" compares against exporter-side "[0].message".
+	if signal == "logs" && strings.HasPrefix(key, "[0].") {
+		return strings.TrimPrefix(key, "[0].")
+	}
+	return key
+}
+
+func (s *Service) captureRequest(source string, signal Signal, listener, path string, r *http.Request) (*observedPayload, *ComparisonResult, bool, error) {
 	body, err := io.ReadAll(http.MaxBytesReader(noopResponseWriter{}, r.Body, 10<<20))
 	if err != nil {
 		return nil, nil, false, fmt.Errorf("failed to read body: %w", err)
@@ -508,17 +619,23 @@ func (s *Service) captureRequest(source, signal, path string, r *http.Request) (
 	r.Body = io.NopCloser(bytes.NewReader(body))
 
 	decodedBody, format, err := decodeBody(body, path, r.Header.Get("Content-Encoding"), r.Header.Get("Content-Type"))
+	fields := map[string]string{}
+	decodeError := ""
 	if err != nil {
-		return nil, nil, false, fmt.Errorf("failed to decode payload: %w", err)
+		format = "raw"
+		decodeError = fmt.Sprintf("failed to decode payload: %v", err)
+	} else {
+		fields = flattenValueMap(decodedBody)
 	}
 
-	fields := flattenValueMap(decodedBody)
 	correlationID := deriveCorrelationFromFields(signal, fields)
 	if correlationID == "" {
 		if headerCorrelationID := r.Header.Get("X-Correlation-ID"); headerCorrelationID != "" {
-			correlationID = signal + ":" + headerCorrelationID
-		} else {
+			correlationID = string(signal) + ":" + headerCorrelationID
+		} else if len(fields) > 0 {
 			correlationID = deriveFingerprintCorrelationID(signal, fields)
+		} else {
+			correlationID = deriveRawBodyCorrelationID(signal, body)
 		}
 	}
 
@@ -529,7 +646,57 @@ func (s *Service) captureRequest(source, signal, path string, r *http.Request) (
 		receivedAt:  time.Now().UTC(),
 		body:        body,
 		format:      format,
+		decodeError: decodeError,
 		request: RequestSnapshot{
+			Listener:        listener,
+			Method:          r.Method,
+			Path:            path,
+			Query:           r.URL.RawQuery,
+			ContentType:     r.Header.Get("Content-Type"),
+			ContentEncoding: r.Header.Get("Content-Encoding"),
+			Format:          format,
+			DecodeError:     decodeError,
+			Headers:         selectedHeaders(r.Header),
+		},
+		flattened: fields,
+	}
+
+	s.receivedTotal.WithLabelValues(source, string(signal)).Inc()
+	logObservedPayload(observed)
+	if decodeError != "" {
+		s.rememberObserved(observed)
+		return observed, nil, false, nil
+	}
+	result, matched := s.observe(observed)
+	if matched && result != nil && source == "exporter" {
+		logComparisonSummary(*result)
+	}
+	return observed, result, matched, nil
+}
+
+func (s *Service) captureDatadogAPIRequest(listener string, r *http.Request) {
+	body := mustReadBodyBytes(r)
+	path := readRequestPath(r)
+	signal := inferDatadogAPISignal(path)
+	format := "raw"
+	fields := map[string]string{}
+
+	if len(body) > 0 {
+		if decodedBody, decodedFormat, err := decodeBody(body, path, r.Header.Get("Content-Encoding"), r.Header.Get("Content-Type")); err == nil {
+			fields = flattenValueMap(decodedBody)
+			format = decodedFormat
+		}
+	}
+
+	observed := &observedPayload{
+		source:      "datadog-api",
+		signal:      signal,
+		correlation: "datadog-api:" + string(signal),
+		receivedAt:  time.Now().UTC(),
+		body:        body,
+		format:      format,
+		request: RequestSnapshot{
+			Listener:        listener,
 			Method:          r.Method,
 			Path:            path,
 			Query:           r.URL.RawQuery,
@@ -541,9 +708,8 @@ func (s *Service) captureRequest(source, signal, path string, r *http.Request) (
 		flattened: fields,
 	}
 
-	s.receivedTotal.WithLabelValues(source, signal).Inc()
-	result, matched := s.observe(observed)
-	return observed, result, matched, nil
+	logObservedPayload(observed)
+	s.rememberObserved(observed)
 }
 
 func flattenValueMap(payload any) map[string]string {
@@ -559,7 +725,7 @@ func flattenValue(result map[string]string, prefix string, value any) {
 		for key := range typed {
 			keys = append(keys, key)
 		}
-		sort.Strings(keys)
+		slices.Sort(keys)
 		for _, key := range keys {
 			next := key
 			if prefix != "" {
@@ -585,50 +751,80 @@ func flattenValue(result map[string]string, prefix string, value any) {
 	}
 }
 
-func deriveCorrelationFromFields(signal string, fields map[string]string) string {
+func deriveCorrelationFromFields(signal Signal, fields map[string]string) string {
 	for _, key := range correlationCandidates(fields) {
 		if candidate := correlationValueForField(key, fields[key]); candidate != "" {
-			return signal + ":" + candidate
+			return string(signal) + ":" + candidate
 		}
 	}
 	return ""
 }
 
-func deriveFingerprintCorrelationID(signal string, fields map[string]string) string {
-	keys := make([]string, 0, len(fields))
-	for key := range fields {
-		keys = append(keys, key)
+func deriveFingerprintCorrelationID(signal Signal, fields map[string]string) string {
+	// Stable Identity Fields by signal type
+	identityFields := map[Signal][]string{
+		SignalTraces:  {"trace_id", "traceID", "[0][0].trace_id"},
+		SignalMetrics: {"series[0].metric", "series[0].points[0][0]"},
+		SignalLogs:    {"message", "timestamp", "attributes.http.url"},
 	}
-	sort.Strings(keys)
 
 	builder := strings.Builder{}
-	builder.WriteString(signal)
-	for _, key := range keys {
-		builder.WriteString("|")
-		builder.WriteString(key)
-		builder.WriteString("=")
-		builder.WriteString(fields[key])
+	builder.WriteString(string(signal))
+
+	foundIdentity := false
+	if keys, ok := identityFields[signal]; ok {
+		for _, key := range keys {
+			if val, ok := fields[key]; ok && val != "" {
+				builder.WriteString("|" + key + "=" + val)
+				foundIdentity = true
+			}
+		}
+	}
+
+	if !foundIdentity {
+		stableTags := []string{"service", "env", "version", "meta.service", "meta.env"}
+		for _, tag := range stableTags {
+			for fieldKey, val := range fields {
+				if strings.Contains(fieldKey, "tags") && strings.Contains(val, tag+":") {
+					builder.WriteString("|" + fieldKey + "=" + val)
+				}
+			}
+		}
 	}
 
 	hash := sha256.Sum256([]byte(builder.String()))
-	return signal + ":" + hex.EncodeToString(hash[:8])
+	return string(signal) + ":fp:" + hex.EncodeToString(hash[:12])
 }
 
-func inferSignalFromDatadogPath(path string) string {
+func deriveRawBodyCorrelationID(signal Signal, body []byte) string {
+	hash := sha256.Sum256(body)
+	return string(signal) + ":" + hex.EncodeToString(hash[:8])
+}
+
+func inferSignalFromDatadogPath(path string) Signal {
 	switch {
-	case path == "/v0.3/traces", path == "/v0.4/traces", path == "/v0.5/traces", path == "/v0.7/traces", path == "/api/v0.2/traces":
-		return "traces"
-	case path == "/api/v1/series", path == "/api/v2/series", path == "/api/v1/check_run", path == "/api/v1/sketches", path == "/api/beta/sketches", path == "/api/v1/distribution_points":
-		return "metrics"
-	case path == "/api/v2/logs":
-		return "logs"
+	case strings.HasSuffix(path, "/traces"):
+		return SignalTraces
+	case strings.HasSuffix(path, "/series"), strings.HasSuffix(path, "/check_run"), strings.HasSuffix(path, "/sketches"), strings.HasSuffix(path, "/distribution_points"):
+		return SignalMetrics
+	case strings.HasSuffix(path, "/logs"):
+		return SignalLogs
 	default:
-		return "unknown"
+		return SignalUnknown
+	}
+}
+
+func inferDatadogAPISignal(path string) Signal {
+	switch path {
+	case "/api/v1/validate":
+		return SignalValidate
+	default:
+		return SignalAPI
 	}
 }
 
 func decodeBody(body []byte, path, contentEncoding, contentType string) (any, string, error) {
-	decoded := body
+	var decoded []byte
 	format := "json"
 
 	if decodedBody, err := decodeCompression(body, contentEncoding); err == nil {
@@ -677,14 +873,20 @@ func decodeCompression(body []byte, contentEncoding string) ([]byte, error) {
 }
 
 func decodeDatadogProtobuf(path string, body []byte) (any, string, error) {
-	switch path {
-	case "/api/v2/series":
+	switch {
+	case strings.HasSuffix(path, "/api/v2/series"):
 		payload := &agentpayload.MetricPayload{}
 		if err := payload.Unmarshal(body); err != nil {
 			return nil, "", err
 		}
 		return protobufToMap(payload)
-	case "/api/v0.2/traces":
+	case strings.HasSuffix(path, "/api/v1/sketches"), strings.HasSuffix(path, "/api/beta/sketches"):
+		payload := &agentpayload.SketchPayload{}
+		if err := payload.Unmarshal(body); err != nil {
+			return nil, "", err
+		}
+		return protobufToMap(payload)
+	case strings.HasSuffix(path, "/api/v0.2/traces"):
 		payload := &tracepb.AgentPayload{}
 		if err := payload.UnmarshalVT(body); err != nil {
 			return nil, "", err
@@ -754,7 +956,7 @@ func correlationCandidates(fields map[string]string) []string {
 	for key := range fields {
 		keys = append(keys, key)
 	}
-	sort.Strings(keys)
+	slices.Sort(keys)
 
 	var candidates []string
 	seen := make(map[string]struct{})
@@ -790,6 +992,7 @@ func correlationCandidates(fields map[string]string) []string {
 				continue
 			}
 			add(key)
+		default:
 		}
 	}
 
@@ -802,6 +1005,7 @@ func correlationCandidates(fields map[string]string) []string {
 			strings.HasPrefix(lower, "resource.correlation_id"),
 			strings.HasPrefix(lower, "resource.fidelity.correlation_id"):
 			add(key)
+		default:
 		}
 	}
 
@@ -820,7 +1024,7 @@ func correlationValueForField(key, value string) string {
 		}
 	}
 	if strings.HasSuffix(lowerKey, ".ddtags") || lowerKey == "ddtags" || strings.HasSuffix(lowerKey, "ddtags") {
-		for _, part := range strings.Split(value, ",") {
+		for part := range strings.SplitSeq(value, ",") {
 			if parsed := parseCorrelationTag(strings.TrimSpace(part)); parsed != "" {
 				return parsed
 			}
@@ -857,7 +1061,7 @@ func gunzip(body []byte) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer reader.Close()
+	defer reader.Close() //nolint:errcheck
 
 	return io.ReadAll(reader)
 }
@@ -867,7 +1071,7 @@ func inflate(body []byte) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer reader.Close()
+	defer reader.Close() //nolint:errcheck
 
 	return io.ReadAll(reader)
 }
@@ -896,14 +1100,14 @@ func selectedHeaders(header http.Header) map[string]string {
 
 func parseOptionalURL(raw string) (*url.URL, error) {
 	if raw == "" {
-		return nil, nil
+		return nil, nil //nolint:nilnil
 	}
 	parsed, err := url.Parse(raw)
 	if err != nil {
 		return nil, err
 	}
 	if parsed.Scheme == "" || parsed.Host == "" {
-		return nil, fmt.Errorf("must include scheme and host")
+		return nil, errors.New("must include scheme and host")
 	}
 	return parsed, nil
 }
@@ -921,6 +1125,7 @@ func mustReadBodyBytes(r *http.Request) []byte {
 	}
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
+		log.Printf("failed to read request body: %v", err)
 		return nil
 	}
 	r.Body = io.NopCloser(bytes.NewReader(body))
@@ -938,7 +1143,7 @@ func (s *Service) forwardRaw(ctx context.Context, upstream *url.URL, path, rawQu
 	}
 	req.Header = cloneHeaders(header)
 	req.Host = upstream.Host
-	return s.httpClient.Do(req)
+	return s.httpClient.Do(req) //nolint:gosec
 }
 
 func joinURLPath(basePath, requestPath string) string {
@@ -974,15 +1179,16 @@ func copyResponse(w http.ResponseWriter, resp *http.Response) {
 	}
 }
 
-func writeDatadogAck(w http.ResponseWriter, signal string) {
+func writeDatadogAck(w http.ResponseWriter, signal Signal) {
 	w.Header().Set("Content-Type", "application/json")
 	switch signal {
-	case "traces":
+	case SignalTraces:
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(`{"rate_by_service":{}}`))
-	case "metrics", "logs":
+	case SignalMetrics, SignalLogs:
 		w.WriteHeader(http.StatusAccepted)
 		_, _ = w.Write([]byte(`{}`))
+	case SignalAPI, SignalValidate, SignalUnknown:
 	default:
 		w.WriteHeader(http.StatusAccepted)
 		_, _ = w.Write([]byte(`{"status":"captured"}`))
@@ -1007,11 +1213,43 @@ func debugPayloadFromObserved(payload *observedPayload) DebugPayload {
 	}
 }
 
+func logObservedPayload(payload *observedPayload) {
+	debug := debugPayloadFromObserved(payload)
+	body, err := json.Marshal(debug)
+	if err != nil {
+		log.Printf("captured payload source=%s signal=%s correlation_id=%s marshal_error=%v", payload.source, payload.signal, payload.correlation, err)
+		return
+	}
+	log.Printf("captured payload %s", string(body))
+}
+
+func logComparisonSummary(result ComparisonResult) {
+	requiredPassed := 0
+	for _, check := range result.RequiredChecks {
+		if check.Passed {
+			requiredPassed++
+		}
+	}
+
+	log.Printf(
+		"comparison result signal=%s correlation_id=%s policy_pass=%t full_payload_pass=%t matched=%d mismatched=%d missing=%d required_passed=%d required_total=%d",
+		result.Signal,
+		result.CorrelationID,
+		result.Passed,
+		result.FullPayloadPassed,
+		len(result.Matched),
+		len(result.Mismatched),
+		len(result.MissingIn),
+		requiredPassed,
+		len(result.RequiredChecks),
+	)
+}
+
 type noopResponseWriter struct{}
 
-func (noopResponseWriter) Header() http.Header        { return make(http.Header) }
-func (noopResponseWriter) Write([]byte) (int, error)  { return 0, nil }
-func (noopResponseWriter) WriteHeader(statusCode int) {}
+func (noopResponseWriter) Header() http.Header       { return make(http.Header) }
+func (noopResponseWriter) Write([]byte) (int, error) { return 0, nil }
+func (noopResponseWriter) WriteHeader(int)           {}
 
 func writeJSON(w http.ResponseWriter, status int, payload any) {
 	w.Header().Set("Content-Type", "application/json")
@@ -1019,4 +1257,13 @@ func writeJSON(w http.ResponseWriter, status int, payload any) {
 	if err := json.NewEncoder(w).Encode(payload); err != nil {
 		log.Printf("failed to write response: %v", err)
 	}
+}
+
+func summarizePolicy(policy Policy) string {
+	signals := make([]string, 0, len(policy.Signals))
+	for signal, signalPolicy := range policy.Signals {
+		signals = append(signals, fmt.Sprintf("%s:%d", signal, len(signalPolicy.RequiredAttributes)))
+	}
+	slices.Sort(signals)
+	return strings.Join(signals, ",")
 }

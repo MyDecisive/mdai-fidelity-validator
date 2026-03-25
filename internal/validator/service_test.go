@@ -166,12 +166,12 @@ func TestCorrelationCandidatesPreferCorrelationIDPaths(t *testing.T) {
 }
 
 func TestInferSignalFromDatadogPath(t *testing.T) {
-	cases := map[string]string{
-		"/v0.4/traces":                "traces",
-		"/api/v1/series":              "metrics",
-		"/api/v2/logs":                "logs",
-		"/something/else":             "unknown",
-		"/api/v1/distribution_points": "metrics",
+	cases := map[string]Signal{
+		"/v0.4/traces":                SignalTraces,
+		"/api/v1/series":              SignalMetrics,
+		"/api/v2/logs":                SignalLogs,
+		"/something/else":             SignalUnknown,
+		"/api/v1/distribution_points": SignalMetrics,
 	}
 
 	for path, want := range cases {
@@ -184,7 +184,7 @@ func TestInferSignalFromDatadogPath(t *testing.T) {
 func TestSelectedHeaders(t *testing.T) {
 	header := http.Header{}
 	header.Set("Content-Type", "application/msgpack")
-	header.Set("DD-API-KEY", "secret")
+	header.Set("Dd-Api-Key", "secret")
 	header.Set("X-Unused", "ignored")
 
 	got := selectedHeaders(header)
@@ -220,5 +220,36 @@ func TestDeriveCorrelationFromLogDDTags(t *testing.T) {
 	got := deriveCorrelationFromFields("logs", fields)
 	if got != "logs:corr-log-1" {
 		t.Fatalf("deriveCorrelationFromFields()=%q want %q", got, "logs:corr-log-1")
+	}
+}
+
+func TestComparePairNormalizesSingleLogArrayPrefix(t *testing.T) {
+	receiver := &observedPayload{
+		source:      "receiver",
+		signal:      "logs",
+		correlation: "logs:corr-1",
+		receivedAt:  time.Now(),
+		flattened: map[string]string{
+			"message": "ddgen synthetic log event",
+			"ddtags":  "env:dev,correlation_id:corr-1",
+		},
+	}
+	exporter := &observedPayload{
+		source:      "exporter",
+		signal:      "logs",
+		correlation: "logs:corr-1",
+		receivedAt:  time.Now(),
+		flattened: map[string]string{
+			"[0].message": "ddgen synthetic log event",
+			"[0].ddtags":  "env:dev,correlation_id:corr-1",
+		},
+	}
+
+	result := comparePair(receiver, exporter, Policy{})
+	if !result.FullPayloadPassed {
+		t.Fatalf("expected full payload pass, got %#v", result)
+	}
+	if len(result.Matched) != 2 {
+		t.Fatalf("expected 2 matched fields, got %d", len(result.Matched))
 	}
 }

@@ -1,78 +1,116 @@
 package validator
 
 import (
+	_ "embed"
 	"encoding/json"
+	"fmt"
 	"os"
-	"sort"
+	"slices"
 	"strconv"
 	"strings"
 
 	"gopkg.in/yaml.v3"
 )
 
-const defaultPolicyPath = "fidelity-policy.yaml"
+const (
+	defaultPolicyPath = "fidelity-policy.yaml"
+	policyPathEnvVar  = "MDAI_FIDELITY_POLICY_PATH"
+)
+
+//go:embed fidelity-policy.yaml
+var embeddedPolicy []byte
+
+type Signal string
+
+const (
+	SignalTraces   Signal = "traces"
+	SignalMetrics  Signal = "metrics"
+	SignalLogs     Signal = "logs"
+	SignalUnknown  Signal = "unknown"
+	SignalAPI      Signal = "api"
+	SignalValidate Signal = "validate"
+)
 
 type Policy struct {
-	Signals map[string]SignalPolicy `yaml:"signals"`
+	Signals map[Signal]SignalPolicy `yaml:"signals"`
 }
 
 type SignalPolicy struct {
-	RequiredAttributes []string `yaml:"required_attributes"`
+	RequiredAttributes []string `yaml:"required_attributes"` //nolint:tagliatelle
 }
 
 type RequiredAttributeCheck struct {
-	Attribute string `json:"attribute"`
-	Receiver  string `json:"receiver,omitempty"`
-	Exporter  string `json:"exporter,omitempty"`
-	Passed    bool   `json:"passed"`
-	Reason    string `json:"reason,omitempty"`
+	Attribute    string `json:"attribute"`
+	Passed       bool   `json:"passed"`
+	TotalItems   int    `json:"total_items,omitempty"`
+	PassedItems  int    `json:"passed_items,omitempty"`
+	MismatchedAt string `json:"mismatched_at,omitempty"`
+	Receiver     string `json:"receiver,omitempty"`
+	Exporter     string `json:"exporter,omitempty"`
+	Reason       string `json:"reason,omitempty"`
 }
 
-func loadPolicy() (Policy, error) {
+func loadPolicy() (Policy, string, error) {
 	policy := defaultPolicy()
 
-	body, err := os.ReadFile(defaultPolicyPath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return policy, nil
+	if configuredPath := os.Getenv(policyPathEnvVar); configuredPath != "" {
+		body, err := os.ReadFile(configuredPath) //nolint:gosec
+		if err != nil {
+			return Policy{}, "", err
 		}
-		return Policy{}, err
+		err = yaml.Unmarshal(body, &policy)
+		if err != nil {
+			return Policy{}, "", err
+		}
+		return policy, fmt.Sprintf("file:%s (via %s)", configuredPath, policyPathEnvVar), nil
 	}
 
-	if err := yaml.Unmarshal(body, &policy); err != nil {
-		return Policy{}, err
+	body, err := os.ReadFile(defaultPolicyPath)
+	if err == nil {
+		err = yaml.Unmarshal(body, &policy)
+		if err != nil {
+			return Policy{}, "", err
+		}
+		return policy, "file:" + defaultPolicyPath, nil
 	}
-	return policy, nil
+	if !os.IsNotExist(err) {
+		return Policy{}, "", err
+	}
+
+	if len(embeddedPolicy) > 0 {
+		err = yaml.Unmarshal(embeddedPolicy, &policy)
+		if err != nil {
+			return Policy{}, "", err
+		}
+		return policy, "embedded:internal/validator/fidelity-policy.yaml", nil
+	}
+
+	return policy, "builtin-defaults", nil
 }
 
 func defaultPolicy() Policy {
 	return Policy{
-		Signals: map[string]SignalPolicy{
-			"metrics": {
+		Signals: map[Signal]SignalPolicy{
+			SignalMetrics: {
 				RequiredAttributes: []string{
 					"metric_name",
-					"correlation_id",
-					"fidelity_correlation_id",
 					"service",
 					"env",
 					"point_timestamp",
 					"point_value",
 				},
 			},
-			"traces": {
+			SignalTraces: {
 				RequiredAttributes: []string{
 					"trace_id",
-					"span_count",
-					"correlation_id",
-					"fidelity_correlation_id",
+					"span_id",
 					"service",
+					"operation",
 				},
 			},
-			"logs": {
+			SignalLogs: {
 				RequiredAttributes: []string{
 					"message",
-					"correlation_id",
-					"fidelity_correlation_id",
 					"service",
 				},
 			},
@@ -80,7 +118,7 @@ func defaultPolicy() Policy {
 	}
 }
 
-func evaluatePolicy(signal string, receiver, exporter map[string]string, policy Policy) ([]RequiredAttributeCheck, bool) {
+func evaluatePolicy(signal Signal, receiver, exporter map[string]string, policy Policy) ([]RequiredAttributeCheck, bool) {
 	signalPolicy, ok := policy.Signals[signal]
 	if !ok || len(signalPolicy.RequiredAttributes) == 0 {
 		return nil, true
@@ -88,191 +126,177 @@ func evaluatePolicy(signal string, receiver, exporter map[string]string, policy 
 
 	checks := make([]RequiredAttributeCheck, 0, len(signalPolicy.RequiredAttributes))
 	allPassed := true
+
 	for _, attribute := range signalPolicy.RequiredAttributes {
-		receiverValue, receiverOK := extractRequiredAttribute(signal, attribute, receiver)
-		exporterValue, exporterOK := extractRequiredAttribute(signal, attribute, exporter)
-
-		check := RequiredAttributeCheck{
-			Attribute: attribute,
-			Receiver:  receiverValue,
-			Exporter:  exporterValue,
-		}
-
-		switch {
-		case !receiverOK:
-			check.Reason = "missing_in_receiver"
-		case !exporterOK:
-			check.Reason = "missing_in_exporter"
-		case receiverValue != exporterValue:
-			check.Reason = "value_mismatch"
-		default:
-			check.Passed = true
-		}
-
+		check := evaluateAttributeDeep(signal, attribute, receiver, exporter)
+		checks = append(checks, check)
 		if !check.Passed {
 			allPassed = false
 		}
-		checks = append(checks, check)
 	}
 
 	return checks, allPassed
 }
 
-func extractRequiredAttribute(signal, attribute string, fields map[string]string) (string, bool) {
-	switch signal {
-	case "metrics":
-		return extractMetricAttribute(attribute, fields)
-	case "traces":
-		return extractTraceAttribute(attribute, fields)
-	case "logs":
-		return extractLogAttribute(attribute, fields)
-	default:
-		return "", false
+func evaluateAttributeDeep(signal Signal, attribute string, receiver, exporter map[string]string) RequiredAttributeCheck {
+	if signal == SignalLogs {
+		return evaluateLogAttribute(attribute, receiver, exporter)
 	}
-}
 
-func extractMetricAttribute(attribute string, fields map[string]string) (string, bool) {
-	switch attribute {
-	case "metric_name":
-		return firstNonEmpty(fields, "series[0].metric")
-	case "correlation_id":
-		return findTagValue(fields, "correlation_id")
-	case "fidelity_correlation_id":
-		return findTagValue(fields, "fidelity.correlation_id")
-	case "service":
-		return findTagValue(fields, "service")
-	case "env":
-		return findTagValue(fields, "env")
-	case "point_timestamp":
-		return firstNonEmpty(fields, "series[0].points[0][0]", "series[0].points[0].timestamp")
-	case "point_value":
-		return firstNonEmpty(fields, "series[0].points[0][1]", "series[0].points[0].value")
-	default:
-		return "", false
+	check := RequiredAttributeCheck{
+		Attribute: attribute,
+		Passed:    true,
 	}
-}
 
-func extractTraceAttribute(attribute string, fields map[string]string) (string, bool) {
-	switch attribute {
-	case "trace_id":
-		return firstNonEmpty(fields,
-			"[0][0].trace_id",
-			"[0][1].trace_id",
-			"tracerPayloads[0].chunks[0].spans[0].trace_id",
-			"tracerPayloads[0].chunks[0].spans[1].trace_id",
-			"tracer_payloads[0].chunks[0].spans[0].trace_id",
-			"tracer_payloads[0].chunks[0].spans[1].trace_id",
-			"tracer_payloads[0].chunks[0].spans[0].traceID",
-			"tracerPayloads[0].chunks[0].spans[0].traceID",
-		)
-	case "span_count":
-		return traceSpanCount(fields)
-	case "correlation_id":
-		return firstNonEmpty(fields,
-			"[0][0].meta.correlation_id",
-			"[0][1].meta.correlation_id",
-			"tracerPayloads[0].chunks[0].spans[0].meta.correlation_id",
-			"tracerPayloads[0].chunks[0].spans[1].meta.correlation_id",
-			"tracer_payloads[0].chunks[0].spans[0].meta.correlation_id",
-			"tracer_payloads[0].chunks[0].spans[1].meta.correlation_id",
-		)
-	case "fidelity_correlation_id":
-		return firstNonEmpty(fields,
-			"[0][0].meta.fidelity.correlation_id",
-			"[0][1].meta.fidelity.correlation_id",
-			"tracerPayloads[0].chunks[0].spans[0].meta.fidelity.correlation_id",
-			"tracerPayloads[0].chunks[0].spans[1].meta.fidelity.correlation_id",
-			"tracer_payloads[0].chunks[0].spans[0].meta.fidelity.correlation_id",
-			"tracer_payloads[0].chunks[0].spans[1].meta.fidelity.correlation_id",
-		)
-	case "service":
-		return firstNonEmpty(fields,
-			"[0][0].service",
-			"[0][1].service",
-			"tracerPayloads[0].chunks[0].spans[0].service",
-			"tracerPayloads[0].chunks[0].spans[1].service",
-			"tracer_payloads[0].chunks[0].spans[0].service",
-			"tracer_payloads[0].chunks[0].spans[1].service",
-		)
-	default:
-		return "", false
+	// 1. Identify all keys in the receiver that match this attribute pattern
+	receiverKeys := findKeysForAttribute(signal, attribute, receiver)
+	if len(receiverKeys) == 0 {
+		check.Passed = false
+		check.Reason = "missing_in_receiver"
+		return check
 	}
-}
 
-func extractLogAttribute(attribute string, fields map[string]string) (string, bool) {
-	switch attribute {
-	case "message":
-		if value, ok := nestedJSONField(fields, "[0].message", "message"); ok {
-			return value, true
-		}
-		return firstNonEmpty(fields, "message")
-	case "correlation_id":
-		if value, ok := firstNonEmpty(fields, "correlation_id"); ok {
-			return value, true
-		}
-		if value, ok := findCommaTagValue(fields, "[0].ddtags", "correlation_id"); ok {
-			return value, true
-		}
-		return findTagValue(fields, "correlation_id")
-	case "fidelity_correlation_id":
-		if value, ok := firstNonEmpty(fields, "attributes.fidelity.correlation_id"); ok {
-			return value, true
-		}
-		if value, ok := findCommaTagValue(fields, "[0].ddtags", "fidelity.correlation_id"); ok {
-			return value, true
-		}
-		return findTagValue(fields, "fidelity.correlation_id")
-	case "service":
-		if value, ok := nestedJSONField(fields, "[0].message", "service"); ok {
-			return value, true
-		}
-		return firstNonEmpty(fields, "service")
-	default:
-		return "", false
-	}
-}
+	check.TotalItems = len(receiverKeys)
 
-func firstNonEmpty(fields map[string]string, keys ...string) (string, bool) {
-	for _, key := range keys {
-		if value := fields[key]; value != "" {
-			return value, true
-		}
-	}
-	return "", false
-}
+	// 2. For every key found in the receiver, verify it exists and matches in the exporter
+	for _, rKey := range receiverKeys {
+		rVal := receiver[rKey]
 
-func findTagValue(fields map[string]string, prefix string) (string, bool) {
-	keys := make([]string, 0, len(fields))
-	for key := range fields {
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
+		// Map the receiver key to the corresponding exporter key
+		// Usually they are identical if the mirroring is 1:1
+		eVal, ok := exporter[rKey]
 
-	for _, key := range keys {
-		if !strings.Contains(key, ".tags[") {
+		if !ok {
+			check.Passed = false
+			if check.MismatchedAt == "" {
+				check.MismatchedAt = rKey
+				check.Reason = "missing_in_exporter"
+				check.Receiver = rVal
+			}
 			continue
 		}
-		value := fields[key]
-		if strings.HasPrefix(value, prefix+":") {
-			return strings.TrimPrefix(value, prefix+":"), true
+
+		if rVal != eVal {
+			check.Passed = false
+			if check.MismatchedAt == "" {
+				check.MismatchedAt = rKey
+				check.Reason = "value_mismatch"
+				check.Receiver = rVal
+				check.Exporter = eVal
+			}
+			continue
 		}
+
+		check.PassedItems++
 	}
-	return "", false
+
+	return check
 }
 
-func findCommaTagValue(fields map[string]string, key, prefix string) (string, bool) {
-	value := fields[key]
-	if value == "" {
-		return "", false
+func evaluateLogAttribute(attribute string, receiver, exporter map[string]string) RequiredAttributeCheck {
+	check := RequiredAttributeCheck{
+		Attribute:   attribute,
+		Passed:      true,
+		TotalItems:  1,
+		PassedItems: 1,
 	}
 
-	for _, part := range strings.Split(value, ",") {
-		part = strings.TrimSpace(part)
-		if strings.HasPrefix(part, prefix+":") {
-			return strings.TrimPrefix(part, prefix+":"), true
+	receiverValue, receiverOK := extractLogAttribute(attribute, receiver)
+	if !receiverOK {
+		check.Passed = false
+		check.PassedItems = 0
+		check.Reason = "missing_in_receiver"
+		return check
+	}
+
+	exporterValue, exporterOK := extractLogAttribute(attribute, exporter)
+	if !exporterOK {
+		check.Passed = false
+		check.PassedItems = 0
+		check.Reason = "missing_in_exporter"
+		check.Receiver = receiverValue
+		return check
+	}
+
+	if receiverValue != exporterValue {
+		check.Passed = false
+		check.PassedItems = 0
+		check.Reason = "value_mismatch"
+		check.Receiver = receiverValue
+		check.Exporter = exporterValue
+	}
+
+	return check
+}
+
+func findKeysForAttribute(signal Signal, attribute string, fields map[string]string) []string {
+	switch signal {
+	case SignalTraces:
+		return findTraceKeysForAttribute(attribute, fields)
+	case SignalMetrics:
+		return findMetricKeysForAttribute(attribute, fields)
+	case SignalLogs:
+		return findLogKeysForAttribute(attribute, fields)
+	case SignalAPI, SignalValidate, SignalUnknown:
+		return nil
+	}
+	return nil
+}
+
+func findTraceKeysForAttribute(attribute string, fields map[string]string) []string {
+	switch attribute {
+	case "trace_id":
+		return collectMatchingKeys(fields, func(k, _ string) bool {
+			return strings.HasSuffix(k, ".trace_id") || strings.HasSuffix(k, ".traceID")
+		})
+	case "span_id":
+		return collectMatchingKeys(fields, func(k, _ string) bool {
+			return strings.HasSuffix(k, ".span_id") || strings.HasSuffix(k, ".spanID")
+		})
+	default:
+		suffix := "." + attribute
+		return collectMatchingKeys(fields, func(k, _ string) bool {
+			return strings.HasSuffix(k, suffix)
+		})
+	}
+}
+
+func findMetricKeysForAttribute(attribute string, fields map[string]string) []string {
+	switch attribute {
+	case "metric_name":
+		return collectMatchingKeys(fields, func(k, _ string) bool {
+			return strings.HasSuffix(k, ".metric")
+		})
+	case "point_timestamp":
+		return collectMatchingKeys(fields, func(k, _ string) bool {
+			return strings.Contains(k, ".points[") && (strings.HasSuffix(k, "][0]") || strings.HasSuffix(k, ".timestamp"))
+		})
+	case "point_value":
+		return collectMatchingKeys(fields, func(k, _ string) bool {
+			return strings.Contains(k, ".points[") && (strings.HasSuffix(k, "][1]") || strings.HasSuffix(k, ".value"))
+		})
+	default:
+		return collectMatchingKeys(fields, func(k, v string) bool {
+			return strings.Contains(k, ".tags[") && strings.HasPrefix(v, attribute+":")
+		})
+	}
+}
+
+func findLogKeysForAttribute(attribute string, fields map[string]string) []string {
+	return collectMatchingKeys(fields, func(k, _ string) bool {
+		return strings.HasSuffix(k, "."+attribute) || k == attribute
+	})
+}
+
+func collectMatchingKeys(fields map[string]string, match func(key, value string) bool) []string {
+	keys := make([]string, 0, len(fields))
+	for k, v := range fields {
+		if match(k, v) {
+			keys = append(keys, k)
 		}
 	}
-	return "", false
+	slices.Sort(keys)
+	return keys
 }
 
 func nestedJSONField(fields map[string]string, key, nestedField string) (string, bool) {
@@ -309,34 +333,111 @@ func toJSONScalar(value any) string {
 	return string(body)
 }
 
-func traceSpanCount(fields map[string]string) (string, bool) {
-	maxIndex := -1
-	for key := range fields {
-		if !strings.HasPrefix(key, "[0][") || !strings.Contains(key, "].trace_id") {
-			continue
-		}
-		rest := strings.TrimPrefix(key, "[0][")
-		indexStr := strings.SplitN(rest, "]", 2)[0]
-		index, err := strconv.Atoi(indexStr)
-		if err != nil {
-			continue
-		}
-		if index > maxIndex {
-			maxIndex = index
+func extractLogAttribute(attribute string, fields map[string]string) (string, bool) {
+	keys := sortedFieldKeys(fields)
+	if value, ok := extractLogAttributeFromNestedMessage(attribute, fields, keys); ok {
+		return value, true
+	}
+	if value, ok := extractLogAttributeDirect(attribute, fields, keys); ok {
+		return value, true
+	}
+	return extractLogAttributeFromDDTags(attribute, fields, keys)
+}
+
+func sortedFieldKeys(fields map[string]string) []string {
+	keys := make([]string, 0, len(fields))
+	for k := range fields {
+		keys = append(keys, k)
+	}
+	slices.Sort(keys)
+	return keys
+}
+
+func extractLogAttributeFromNestedMessage(attribute string, fields map[string]string, keys []string) (string, bool) {
+	for _, k := range keys {
+		if k == "message" || strings.HasSuffix(k, ".message") {
+			if val, ok := nestedJSONField(fields, k, attribute); ok {
+				return val, true
+			}
 		}
 	}
-	if maxIndex >= 0 {
-		return strconv.Itoa(maxIndex + 1), true
+	return "", false
+}
+
+func extractLogAttributeDirect(attribute string, fields map[string]string, keys []string) (string, bool) {
+	for _, k := range keys {
+		if k == attribute || strings.HasSuffix(k, "."+attribute) {
+			return fields[k], true
+		}
+		if attribute == "fidelity_correlation_id" && (k == "fidelity.correlation_id" || strings.HasSuffix(k, ".fidelity.correlation_id")) {
+			return fields[k], true
+		}
+	}
+	return "", false
+}
+
+func extractLogAttributeFromDDTags(attribute string, fields map[string]string, keys []string) (string, bool) {
+	for _, k := range keys {
+		if k == "ddtags" || strings.HasSuffix(k, ".ddtags") {
+			if value, ok := findAttributeInDDTags(attribute, fields[k]); ok {
+				return value, true
+			}
+		}
+	}
+	return "", false
+}
+
+func findAttributeInDDTags(attribute, ddtags string) (string, bool) {
+	for tag := range strings.SplitSeq(ddtags, ",") {
+		key, val, ok := parseTagKV(tag)
+		if !ok {
+			continue
+		}
+		if key == attribute {
+			return val, true
+		}
+		if attribute == "fidelity_correlation_id" && key == "fidelity.correlation_id" {
+			return val, true
+		}
+	}
+	return "", false
+}
+
+func parseTagKV(tag string) (string, string, bool) {
+	parts := strings.SplitN(tag, ":", 2)
+	if len(parts) != 2 {
+		return "", "", false
+	}
+	return strings.TrimSpace(parts[0]), strings.TrimSpace(parts[1]), true
+}
+
+func extractTraceAttribute(attribute string, fields map[string]string) (string, bool) {
+	keys := make([]string, 0, len(fields))
+	for k := range fields {
+		keys = append(keys, k)
+	}
+	slices.Sort(keys)
+
+	if attribute == "span_count" {
+		prefixes := make(map[string]struct{})
+		for _, k := range keys {
+			if strings.HasSuffix(k, ".trace_id") || strings.HasSuffix(k, ".traceID") {
+				idx := strings.LastIndex(k, ".")
+				if idx != -1 {
+					prefixes[k[:idx]] = struct{}{}
+				}
+			}
+		}
+		if len(prefixes) > 0 {
+			return strconv.Itoa(len(prefixes)), true
+		}
+		return "", false
 	}
 
-	count := 0
-	for key := range fields {
-		if strings.Contains(key, ".spans[") && (strings.HasSuffix(key, ".traceID") || strings.HasSuffix(key, ".trace_id")) {
-			count++
+	for _, k := range keys {
+		if k == attribute || strings.HasSuffix(k, "."+attribute) {
+			return fields[k], true
 		}
-	}
-	if count > 0 {
-		return strconv.Itoa(count), true
 	}
 	return "", false
 }
