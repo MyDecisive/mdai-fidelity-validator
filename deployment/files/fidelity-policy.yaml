@@ -14,7 +14,7 @@ signals:
     required_attributes:
       - name: ddsource
         compare: presence_only
-#      - ddtags
+      - ddtags
       - name: hostname
         compare: presence_only
       - service

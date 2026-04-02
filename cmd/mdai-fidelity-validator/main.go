@@ -33,8 +33,8 @@ func main() {
 
 func run(logger *zap.Logger) error {
 	adminAddr := envOrDefault("MDAI_ADMIN_ADDR", ":8080")
-	ingestAddr := envOrDefault("MDAI_INGEST_ADDR", ":8126")
-	datadogAPIAddr := envOrDefault("MDAI_DATADOG_API_ADDR", ":8081")
+	ingestAddr := envOrDefault("MDAI_DATADOG_AGENT_INGEST_ADDR", ":8126")
+	exporterAPIAddr := envOrDefault("MDAI_EXPORTER_API_ADDR", ":18081")
 	retention := durationEnvOrDefault("MDAI_RETENTION", 30*time.Minute)
 	receiverUpstream := os.Getenv("MDAI_RECEIVER_UPSTREAM")
 	exporterUpstream := os.Getenv("MDAI_EXPORTER_UPSTREAM")
@@ -55,20 +55,20 @@ func run(logger *zap.Logger) error {
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 	datadogAPIServer := &http.Server{
-		Addr:              datadogAPIAddr,
-		Handler:           svc.DatadogAPIRoutes(),
+		Addr:              exporterAPIAddr,
+		Handler:           svc.ExporterAPIRoutes(),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
 	errCh := make(chan error, 3)
 	go serve("admin", adminServer, logger, errCh)
-	go serve("ingest", ingestServer, logger, errCh)
-	go serve("datadog-api", datadogAPIServer, logger, errCh)
+	go serve("datadog-agent-ingest", ingestServer, logger, errCh)
+	go serve("exporter-api", datadogAPIServer, logger, errCh)
 
 	logger.Info("mdai-fidelity-validator started",
 		zap.String("admin", adminAddr),
-		zap.String("ingest", ingestAddr),
-		zap.String("datadog_api", datadogAPIAddr),
+		zap.String("datadog_agent_ingest", ingestAddr),
+		zap.String("exporter_api", exporterAPIAddr),
 	)
 
 	stopCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

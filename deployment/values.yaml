@@ -20,11 +20,17 @@ image:
 
 env:
   adminAddr: ":8080"
-  ingestAddr: ":8126"
-  datadogAPIAddr: ":8081"
+  datadogAgentIngestAddr: ":8126"
+  exporterAPIAddr: ":18081"
   retention: "30m"
   receiverUpstream: ""
   exporterUpstream: ""
+  configReloadInterval: "15s"
+
+config:
+  enabled: true
+  mountPath: /etc/mdai-config
+  name: mdai-fidelity-validator-config
 
 service:
   name: mdai-fidelity-validator
@@ -34,11 +40,11 @@ service:
       port: 8080
       targetPort: 8080
       protocol: TCP
-    - name: ingest
+    - name: dd-agent-ingest
       port: 8126
       targetPort: 8126
       protocol: TCP
-    - name: dd-api
-      port: 8081
-      targetPort: 8081
+    - name: exporter-api
+      port: 18081
+      targetPort: 18081
       protocol: TCP

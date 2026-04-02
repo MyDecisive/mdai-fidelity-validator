@@ -7,7 +7,7 @@ GO := CGO_ENABLED=0 GOTOOLCHAIN=$(GOTOOLCHAIN) go
 GO_TEST := $(GO) test -count=1
 
 docker-login docker-build docker-push kind-load: AWS_ECR_REPO := public.ecr.aws/decisiveai
-docker-build docker-push kind-load: DOCKER_IMAGE := $(AWS_ECR_REPO)/$(REPO_NAME):$(DOCKER_TAG)
+docker-build docker-push kind-load: DOCKER_IMAGE ?= $(AWS_ECR_REPO)/$(REPO_NAME):$(DOCKER_TAG)
 
 .PHONY: docker-login
 docker-login:

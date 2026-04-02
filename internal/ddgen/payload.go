@@ -54,12 +54,13 @@ type Request struct {
 }
 
 type Options struct {
-	Signal      Signal
-	Encoding    Encoding
-	Gzip        bool
-	Service     string
-	Environment string
-	Host        string
+	Signal          Signal
+	Encoding        Encoding
+	Gzip            bool
+	Service         string
+	Environment     string
+	Host            string
+	OmitCorrelation bool
 }
 
 func BuildRequest(opts Options) (Request, error) {
@@ -129,9 +130,12 @@ func BuildRequestWithCorrelation(opts Options, correlationID string, dropAttrPro
 }
 
 func buildPayload(opts Options, fixedCorrelationID ...string) (any, string, string, ContentType, error) {
-	correlationID := "corr-" + randomHex(8)
-	if len(fixedCorrelationID) > 0 && fixedCorrelationID[0] != "" {
-		correlationID = fixedCorrelationID[0]
+	correlationID := ""
+	if !opts.OmitCorrelation {
+		correlationID = "corr-" + randomHex(8)
+		if len(fixedCorrelationID) > 0 && fixedCorrelationID[0] != "" {
+			correlationID = fixedCorrelationID[0]
+		}
 	}
 	if opts.Service == "" {
 		opts.Service = "ddgen-" + randomHex(4)
@@ -153,7 +157,7 @@ func buildPayload(opts Options, fixedCorrelationID ...string) (any, string, stri
 	case SignalTraces:
 		path = "/v0.4/traces"
 		contentType = ContentTypeJSON
-		payload = buildTracePayload(opts.Service, opts.Environment, opts.Host, correlationID)
+		payload = buildTracePayload(opts.Service, opts.Environment, opts.Host, correlationID, !opts.OmitCorrelation)
 		if opts.Encoding == EncodingMsgpack {
 			contentType = ContentTypeMsgpack
 		}
@@ -163,11 +167,11 @@ func buildPayload(opts Options, fixedCorrelationID ...string) (any, string, stri
 		}
 		path = "/api/v1/series"
 		contentType = ContentTypeJSON
-		payload = buildMetricsPayload(opts.Service, opts.Environment, opts.Host, correlationID)
+		payload = buildMetricsPayload(opts.Service, opts.Environment, opts.Host, correlationID, !opts.OmitCorrelation)
 	case SignalLogs:
 		path = "/api/v2/logs"
 		contentType = ContentTypeJSON
-		payload = buildLogsPayload(opts.Service, opts.Environment, opts.Host, correlationID)
+		payload = buildLogsPayload(opts.Service, opts.Environment, opts.Host, correlationID, !opts.OmitCorrelation)
 		if opts.Encoding == EncodingMsgpack {
 			contentType = ContentTypeMsgpack
 		}
@@ -189,7 +193,7 @@ func marshal(payload any, encoding Encoding) ([]byte, error) {
 	}
 }
 
-func buildTracePayload(service, env, host, correlationID string) any {
+func buildTracePayload(service, env, host, correlationID string, includeCorrelation bool) any {
 	now := time.Now()
 	start := now.Add(-250 * time.Millisecond).UnixNano()
 	duration := int64(250 * time.Millisecond)
@@ -197,7 +201,7 @@ func buildTracePayload(service, env, host, correlationID string) any {
 	parentSpanID := randomUint63()
 	childSpanID := randomUint63()
 
-	return [][]map[string]any{
+	payload := [][]map[string]any{
 		{
 			{
 				"trace_id": traceID,
@@ -209,10 +213,8 @@ func buildTracePayload(service, env, host, correlationID string) any {
 				"start":    start,
 				"duration": duration,
 				"meta": map[string]any{
-					"env":                     env,
-					"host":                    host,
-					"correlation_id":          correlationID,
-					"fidelity.correlation_id": correlationID,
+					"env":  env,
+					"host": host,
 				},
 				"metrics": map[string]any{
 					"_sampling_priority_v1": 1,
@@ -229,18 +231,27 @@ func buildTracePayload(service, env, host, correlationID string) any {
 				"start":     start + int64(50*time.Millisecond),
 				"duration":  int64(100 * time.Millisecond),
 				"meta": map[string]any{
-					"env":                     env,
-					"host":                    host,
-					"correlation_id":          correlationID,
-					"fidelity.correlation_id": correlationID,
+					"env":  env,
+					"host": host,
 				},
 			},
 		},
 	}
+	if includeCorrelation {
+		addTraceCorrelation(payload, correlationID)
+	}
+	return payload
 }
 
-func buildMetricsPayload(service, env, host, correlationID string) any {
+func buildMetricsPayload(service, env, host, correlationID string, includeCorrelation bool) any {
 	now := float64(time.Now().Unix())
+	tags := []string{
+		"service:" + service,
+		"env:" + env,
+	}
+	if includeCorrelation {
+		tags = append(tags, "correlation_id:"+correlationID, "fidelity.correlation_id:"+correlationID)
+	}
 	return map[string]any{
 		"series": []map[string]any{
 			{
@@ -248,31 +259,43 @@ func buildMetricsPayload(service, env, host, correlationID string) any {
 				"type":   "gauge",
 				"host":   host,
 				"points": [][]float64{{now, 123.45}},
-				"tags": []string{
-					"service:" + service,
-					"env:" + env,
-					"correlation_id:" + correlationID,
-					"fidelity.correlation_id:" + correlationID,
-				},
+				"tags":   tags,
 			},
 		},
 	}
 }
 
-func buildLogsPayload(service, env, host, correlationID string) any {
-	return map[string]any{
-		"message":        "ddgen synthetic log event",
-		"service":        service,
-		"hostname":       host,
-		"ddsource":       "mdai-fidelity-validator",
-		"ddtags":         "env:" + env + ",correlation_id:" + correlationID + ",fidelity.correlation_id:" + correlationID,
-		"status":         "info",
-		"timestamp":      time.Now().UTC().UnixMilli(),
-		"correlation_id": correlationID,
+func buildLogsPayload(service, env, host, correlationID string, includeCorrelation bool) any {
+	payload := map[string]any{
+		"message":   "ddgen synthetic log event",
+		"service":   service,
+		"hostname":  host,
+		"ddsource":  "mdai-fidelity-validator",
+		"ddtags":    "env:" + env,
+		"status":    "info",
+		"timestamp": time.Now().UTC().UnixMilli(),
 		"attributes": map[string]any{
-			"fidelity.correlation_id": correlationID,
-			"env":                     env,
+			"env": env,
 		},
+	}
+	if includeCorrelation {
+		payload["ddtags"] = "env:" + env + ",correlation_id:" + correlationID + ",fidelity.correlation_id:" + correlationID
+		payload["correlation_id"] = correlationID
+		payload["attributes"].(map[string]any)["fidelity.correlation_id"] = correlationID
+	}
+	return payload
+}
+
+func addTraceCorrelation(trace [][]map[string]any, correlationID string) {
+	for i := range trace {
+		for j := range trace[i] {
+			meta, ok := trace[i][j]["meta"].(map[string]any)
+			if !ok {
+				continue
+			}
+			meta["correlation_id"] = correlationID
+			meta["fidelity.correlation_id"] = correlationID
+		}
 	}
 }
 

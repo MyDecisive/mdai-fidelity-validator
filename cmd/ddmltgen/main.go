@@ -41,6 +41,7 @@ func run() error {
 		count               = flag.Int("count", 1, "Number of requests to send")
 		interval            = flag.Duration("interval", 0, "Delay between requests")
 		useGzip             = flag.Bool("gzip", false, "Compress payloads with gzip")
+		omitCorrelationID   = flag.Bool("omit-correlation-id", false, "Do not include correlation_id/fidelity.correlation_id in payloads or X-Correlation-ID header")
 		service             = flag.String("service", "", "Service name override")
 		env                 = flag.String("env", "dev", "Environment tag")
 		host                = flag.String("host", "localhost", "Hostname value")
@@ -84,12 +85,13 @@ func run() error {
 	for i := range *count {
 		ctx := context.Background()
 		opts := ddgen.Options{
-			Signal:      parsedSignal,
-			Encoding:    parsedEncoding,
-			Gzip:        *useGzip,
-			Service:     *service,
-			Environment: *env,
-			Host:        *host,
+			Signal:          parsedSignal,
+			Encoding:        parsedEncoding,
+			Gzip:            *useGzip,
+			Service:         *service,
+			Environment:     *env,
+			Host:            *host,
+			OmitCorrelation: *omitCorrelationID,
 		}
 		reqSpec, err := ddgen.BuildRequest(opts)
 		if err != nil {
@@ -137,7 +139,9 @@ func doRequest(ctx context.Context, client *http.Client, target *url.URL, reqSpe
 	}
 	req.Header.Set("Content-Type", string(reqSpec.ContentType))
 	req.Header.Set("User-Agent", userAgent)
-	req.Header.Set("X-Correlation-ID", reqSpec.CorrelationID)
+	if reqSpec.CorrelationID != "" {
+		req.Header.Set("X-Correlation-ID", reqSpec.CorrelationID)
+	}
 	req.Header.Set("Dd-Api-Key", "demo-api-key")
 	if fidelitySide != "" {
 		req.Header.Set("X-Fidelity-Side", fidelitySide)

@@ -1,0 +1,12 @@
+{{- if .Values.config.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Values.config.name }}
+  namespace: {{ .Release.Namespace }}
+data:
+  fidelity-policy.yaml: |
+{{ .Files.Get "files/fidelity-policy.yaml" | indent 4 }}
+  field-mapping.yaml: |
+{{ .Files.Get "files/field-mapping.yaml" | indent 4 }}
+{{- end }}

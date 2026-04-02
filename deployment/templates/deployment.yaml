@@ -47,19 +47,31 @@ spec:
           ports:
             - name: admin
               containerPort: 8080
-            - name: ingest
+            - name: dd-agent-ingest
               containerPort: 8126
-            - name: dd-api
-              containerPort: 8081
+            - name: exporter-api
+              containerPort: 18081
           env:
             - name: MDAI_ADMIN_ADDR
               value: {{ .Values.env.adminAddr | quote }}
-            - name: MDAI_INGEST_ADDR
-              value: {{ .Values.env.ingestAddr | quote }}
-            - name: MDAI_DATADOG_API_ADDR
-              value: {{ .Values.env.datadogAPIAddr | quote }}
+            {{- if .Values.env.datadogAgentIngestAddr }}
+            - name: MDAI_DATADOG_AGENT_INGEST_ADDR
+              value: {{ .Values.env.datadogAgentIngestAddr | quote }}
+            {{- end }}
+            - name: MDAI_EXPORTER_API_ADDR
+              value: {{ .Values.env.exporterAPIAddr | quote }}
             - name: MDAI_RETENTION
               value: {{ .Values.env.retention | quote }}
+            {{- if .Values.env.configReloadInterval }}
+            - name: MDAI_CONFIG_RELOAD_INTERVAL
+              value: {{ .Values.env.configReloadInterval | quote }}
+            {{- end }}
+            {{- if .Values.config.enabled }}
+            - name: MDAI_FIDELITY_POLICY_PATH
+              value: {{ printf "%s/fidelity-policy.yaml" .Values.config.mountPath | quote }}
+            - name: MDAI_FIELD_MAPPING_PATH
+              value: {{ printf "%s/field-mapping.yaml" .Values.config.mountPath | quote }}
+            {{- end }}
             {{- if .Values.env.receiverUpstream }}
             - name: MDAI_RECEIVER_UPSTREAM
               value: {{ .Values.env.receiverUpstream | quote }}
@@ -68,3 +80,15 @@ spec:
             - name: MDAI_EXPORTER_UPSTREAM
               value: {{ .Values.env.exporterUpstream | quote }}
             {{- end }}
+          {{- if .Values.config.enabled }}
+          volumeMounts:
+            - name: validator-config
+              mountPath: {{ .Values.config.mountPath | quote }}
+              readOnly: true
+          {{- end }}
+      {{- if .Values.config.enabled }}
+      volumes:
+        - name: validator-config
+          configMap:
+            name: {{ .Values.config.name }}
+      {{- end }}

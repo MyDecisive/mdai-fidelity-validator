@@ -13,8 +13,10 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"slices"
 	"strconv"
 	"strings"
@@ -22,8 +24,6 @@ import (
 	"time"
 	"unicode/utf8"
 
-	agentpayload "github.com/DataDog/agent-payload/v5/gogen"
-	tracepb "github.com/DataDog/datadog-agent/pkg/proto/pbgo/trace"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -32,10 +32,81 @@ import (
 
 const numShards = 32
 
+const (
+	defaultPairID       = "default"
+	defaultTranslatorID = "datadog_raw"
+	pairHeaderKey       = "X-Fidelity-Pair"
+	configReloadEnvVar  = "MDAI_CONFIG_RELOAD_INTERVAL"
+)
+
 type shard struct {
 	mu         sync.Mutex
 	pending    map[string]*observedPayload
 	lastResult map[string]ComparisonResult
+}
+
+type PayloadTranslator interface {
+	Name() string
+	Decode(signal Signal, path, contentEncoding, contentType string, body []byte) DecodedPayload
+}
+
+type DecodedPayload struct {
+	Signal        Signal
+	CorrelationID string
+	Attributes    map[string]string
+	Format        string
+	DecodeError   string
+}
+
+type datadogRawTranslator struct {
+	mapping *mappingStore
+}
+
+func (datadogRawTranslator) Name() string { return defaultTranslatorID }
+
+func (t datadogRawTranslator) Decode(signal Signal, path, contentEncoding, contentType string, body []byte) DecodedPayload {
+	decodedBody, format, err := decodeBody(body, path, contentEncoding, contentType)
+	if err != nil {
+		return DecodedPayload{
+			Signal:      signal,
+			Attributes:  map[string]string{},
+			Format:      "raw",
+			DecodeError: fmt.Sprintf("failed to decode payload: %v", err),
+		}
+	}
+	canonicalSignal := signal
+	if canonicalSignal == SignalUnknown {
+		_, normalizedPath := parseExporterPath(path)
+		canonicalSignal = inferSignalFromDatadogPath(normalizedPath)
+	}
+	fields := t.mapping.MapForPath(canonicalSignal, path, flattenValueMap(decodedBody))
+	decodeError := ""
+	if len(fields) == 0 {
+		decodeError = "field mapping produced no canonical attributes"
+	}
+	return DecodedPayload{
+		Signal:        canonicalSignal,
+		CorrelationID: firstNonEmpty(fields["correlation_id"], fields["fidelity_correlation_id"]),
+		Attributes:    fields,
+		Format:        format,
+		DecodeError:   decodeError,
+	}
+}
+
+type PairConfig struct {
+	ID                 string   `json:"id"`
+	ReceiverTranslator string   `json:"receiver_translator"`
+	ExporterTranslator string   `json:"exporter_translator"`
+	ReceiverUpstream   string   `json:"receiver_upstream,omitempty"`
+	ExporterUpstream   string   `json:"exporter_upstream,omitempty"`
+	ReceiverPorts      []string `json:"receiver_ports,omitempty"`
+	ExporterPorts      []string `json:"exporter_ports,omitempty"`
+}
+
+type configuredPair struct {
+	PairConfig
+	receiverUpstream *url.URL
+	exporterUpstream *url.URL
 }
 
 type Service struct {
@@ -43,14 +114,22 @@ type Service struct {
 	retention  time.Duration
 	httpClient *http.Client
 	policy     Policy
+	policyMu   sync.RWMutex
 
 	// Registry lock for global lookups/debug
 	regMu        sync.Mutex
 	lastBySource map[string]*observedPayload
 	lastByKey    map[string]*observedPayload
 
-	receiverUpstream *url.URL
-	exporterUpstream *url.URL
+	receiverUpstream   *url.URL
+	exporterUpstream   *url.URL
+	defaultPair        string
+	translatorMu       sync.RWMutex
+	translators        map[string]PayloadTranslator
+	pairMu             sync.RWMutex
+	pairs              map[string]configuredPair
+	receiverPairByPort map[string]string
+	exporterPairByPort map[string]string
 
 	receivedTotal *prometheus.CounterVec
 	attributeEval *prometheus.CounterVec
@@ -60,7 +139,31 @@ type Service struct {
 	pendingGauge  prometheus.Gauge
 }
 
+type mappingStore struct {
+	mu      sync.RWMutex
+	current FieldMapping
+}
+
+func newMappingStore(initial FieldMapping) *mappingStore {
+	return &mappingStore{current: initial}
+}
+
+func (m *mappingStore) MapForPath(signal Signal, path string, fields map[string]string) map[string]string {
+	m.mu.RLock()
+	mapping := m.current
+	m.mu.RUnlock()
+	return mapping.MapForPath(signal, path, fields)
+}
+
+func (m *mappingStore) Set(next FieldMapping) {
+	m.mu.Lock()
+	m.current = next
+	m.mu.Unlock()
+}
+
 type observedPayload struct {
+	pair        string
+	translator  string
 	source      string
 	signal      Signal
 	correlation string
@@ -116,6 +219,8 @@ type RequestSnapshot struct {
 }
 
 type DebugPayload struct {
+	Pair          string            `json:"pair"`
+	Translator    string            `json:"translator"`
 	Source        string            `json:"source"`
 	Signal        Signal            `json:"signal"`
 	CorrelationID string            `json:"correlation_id"`
@@ -140,6 +245,11 @@ func NewService(retention time.Duration, receiverUpstream, exporterUpstream stri
 		return nil, fmt.Errorf("load policy: %w", err)
 	}
 	log.Printf("loaded fidelity policy source=%s summary=%s", policySource, summarizePolicy(policy))
+	fieldMap, mappingSource, err := loadFieldMapping()
+	if err != nil {
+		return nil, fmt.Errorf("load field mapping: %w", err)
+	}
+	log.Printf("loaded field mapping source=%s", mappingSource)
 
 	svc := &Service{
 		shards:           make([]*shard, numShards),
@@ -150,6 +260,23 @@ func NewService(retention time.Duration, receiverUpstream, exporterUpstream stri
 		policy:           policy,
 		receiverUpstream: receiverURL,
 		exporterUpstream: exporterURL,
+		defaultPair:      defaultPairID,
+		translators: map[string]PayloadTranslator{
+			defaultTranslatorID: datadogRawTranslator{mapping: newMappingStore(fieldMap)},
+		},
+		pairs: map[string]configuredPair{
+			defaultPairID: {
+				PairConfig: PairConfig{
+					ID:                 defaultPairID,
+					ReceiverTranslator: defaultTranslatorID,
+					ExporterTranslator: defaultTranslatorID,
+				},
+				receiverUpstream: receiverURL,
+				exporterUpstream: exporterURL,
+			},
+		},
+		receiverPairByPort: make(map[string]string),
+		exporterPairByPort: make(map[string]string),
 		receivedTotal: promauto.NewCounterVec(prometheus.CounterOpts{
 			Name: "mdai_fidelity_payloads_received_total",
 			Help: "Number of payloads received by source and signal.",
@@ -182,8 +309,92 @@ func NewService(retention time.Duration, receiverUpstream, exporterUpstream stri
 			lastResult: make(map[string]ComparisonResult),
 		}
 	}
-
+	svc.startConfigReloader()
 	return svc, nil
+}
+
+func (s *Service) currentPolicy() Policy {
+	s.policyMu.RLock()
+	defer s.policyMu.RUnlock()
+	return s.policy
+}
+
+func (s *Service) setPolicy(next Policy) {
+	s.policyMu.Lock()
+	s.policy = next
+	s.policyMu.Unlock()
+}
+
+func (s *Service) setMapping(next FieldMapping) {
+	s.translatorMu.RLock()
+	translator, ok := s.translators[defaultTranslatorID]
+	s.translatorMu.RUnlock()
+	if !ok {
+		return
+	}
+	raw, ok := translator.(datadogRawTranslator)
+	if !ok || raw.mapping == nil {
+		return
+	}
+	raw.mapping.Set(next)
+}
+
+func (s *Service) startConfigReloader() {
+	interval := 15 * time.Second
+	if raw := strings.TrimSpace(os.Getenv(configReloadEnvVar)); raw != "" {
+		parsed, err := time.ParseDuration(raw)
+		if err != nil {
+			log.Printf("invalid %s=%q; using default %s", configReloadEnvVar, raw, interval)
+		} else if parsed > 0 {
+			interval = parsed
+		}
+	}
+
+	var (
+		lastPolicySig  string
+		lastMappingSig string
+	)
+	reload := func() {
+		policy, source, err := loadPolicy()
+		if err != nil {
+			log.Printf("policy reload failed; keeping last-known-good err=%v", err)
+		} else if sig, sigErr := configSignature(policy); sigErr == nil {
+			if sig != lastPolicySig {
+				s.setPolicy(policy)
+				lastPolicySig = sig
+				log.Printf("reloaded fidelity policy source=%s summary=%s", source, summarizePolicy(policy))
+			}
+		}
+
+		mapping, source, err := loadFieldMapping()
+		if err != nil {
+			log.Printf("field mapping reload failed; keeping last-known-good err=%v", err)
+		} else if sig, sigErr := configSignature(mapping); sigErr == nil {
+			if sig != lastMappingSig {
+				s.setMapping(mapping)
+				lastMappingSig = sig
+				log.Printf("reloaded field mapping source=%s", source)
+			}
+		}
+	}
+
+	reload()
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for range ticker.C {
+			reload()
+		}
+	}()
+}
+
+func configSignature(v any) (string, error) {
+	body, err := json.Marshal(v)
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256(body)
+	return hex.EncodeToString(sum[:]), nil
 }
 
 func (s *Service) AdminRoutes() http.Handler {
@@ -194,6 +405,8 @@ func (s *Service) AdminRoutes() http.Handler {
 	mux.HandleFunc("/debug/last/", s.handleDebugLast)
 	mux.HandleFunc("/debug/last-signal/", s.handleDebugLastSignal)
 	mux.HandleFunc("/debug/results", s.handleDebugResults)
+	mux.HandleFunc("/debug/pairs", s.handleDebugPairs)
+	mux.HandleFunc("/admin/pairs", s.handleAdminPairs)
 	mux.HandleFunc("/intake/receiver/", s.handleSource("receiver"))
 	mux.HandleFunc("/intake/exporter/", s.handleSource("exporter"))
 	mux.HandleFunc("/results/", s.handleResults)
@@ -207,10 +420,10 @@ func (s *Service) IngestRoutes() http.Handler {
 	return mux
 }
 
-func (s *Service) DatadogAPIRoutes() http.Handler {
+func (s *Service) ExporterAPIRoutes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/validate", s.handleDatadogValidate)
-	mux.HandleFunc("/", s.handleDatadogAPI)
+	mux.HandleFunc("/", s.handleExporterAPI)
 	return mux
 }
 
@@ -332,6 +545,70 @@ func (s *Service) handleDebugResults(w http.ResponseWriter, _ *http.Request) {
 	})
 }
 
+func (s *Service) handleDebugPairs(w http.ResponseWriter, _ *http.Request) {
+	s.pairMu.RLock()
+	defer s.pairMu.RUnlock()
+
+	pairs := make([]map[string]any, 0, len(s.pairs))
+	for _, pair := range s.pairs {
+		pairs = append(pairs, map[string]any{
+			"id":                  pair.ID,
+			"receiver_translator": pair.ReceiverTranslator,
+			"exporter_translator": pair.ExporterTranslator,
+			"receiver_upstream":   pair.ReceiverUpstream,
+			"exporter_upstream":   pair.ExporterUpstream,
+			"receiver_ports":      pair.ReceiverPorts,
+			"exporter_ports":      pair.ExporterPorts,
+			"default":             pair.ID == s.defaultPair,
+		})
+	}
+	slices.SortFunc(pairs, func(a, b map[string]any) int {
+		return strings.Compare(a["id"].(string), b["id"].(string))
+	})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"default_pair": s.defaultPair,
+		"pairs":        pairs,
+	})
+}
+
+func (s *Service) handleAdminPairs(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodPost, http.MethodPut:
+	default:
+		http.Error(w, "method not allowed, supported: [POST, PUT]", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req struct {
+		PairConfig
+		Default bool `json:"default"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid json body", http.StatusBadRequest)
+		return
+	}
+
+	pair, err := s.newConfiguredPair(req.PairConfig)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	s.pairMu.Lock()
+	s.pairs[pair.ID] = pair
+	if req.Default {
+		s.defaultPair = pair.ID
+	}
+	s.rebuildPortMappingsLocked()
+	s.pairMu.Unlock()
+
+	writeJSON(w, http.StatusAccepted, map[string]any{
+		"saved":   true,
+		"pair":    pair.ID,
+		"default": req.Default,
+	})
+}
+
 func (s *Service) handleDatadogValidate(w http.ResponseWriter, r *http.Request) {
 	s.captureDatadogAPIRequest(":8443", r)
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -339,53 +616,58 @@ func (s *Service) handleDatadogValidate(w http.ResponseWriter, r *http.Request) 
 	})
 }
 
-func (s *Service) handleDatadogAPI(w http.ResponseWriter, r *http.Request) {
+func (s *Service) handleExporterAPI(w http.ResponseWriter, r *http.Request) {
 	path := readRequestPath(r)
-	signal := inferSignalFromDatadogPath(path)
-	if signal != "unknown" {
-		observed, _, _, err := s.captureRequest("exporter", signal, ":8081", path, r)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
+	_, normalizedPath := parseExporterPath(path)
+	signal := inferSignalFromDatadogPath(normalizedPath)
 
-		if s.exporterUpstream == nil {
-			writeDatadogAck(w, signal)
-			return
-		}
-
-		resp, err := s.forwardRaw(r.Context(), s.exporterUpstream, path, r.URL.RawQuery, r.Method, r.Header, observed.body)
-		if err != nil {
-			http.Error(w, fmt.Sprintf("forwarding failed: %v", err), http.StatusBadGateway)
-			return
-		}
-		defer resp.Body.Close() //nolint:errcheck
-
-		copyResponse(w, resp)
+	pair := s.resolvePairForRequest(r, "exporter", ":18081")
+	observed, _, _, err := s.captureRequest(pair.ID, pair.ExporterTranslator, "exporter", signal, ":18081", path, r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 
-	//nolint:gosec // debug log for unsupported paths; request details are intentionally logged.
-	log.Printf("rejected datadog-api request listener=%s method=%s path=%s reason=%q headers=%v",
-		":8081", r.Method, path, "unsupported path on datadog-api listener", selectedHeaders(r.Header))
-	http.Error(w, "unsupported path", http.StatusNotFound)
+	upstream := pair.exporterUpstream
+	if upstream == nil {
+		upstream = s.exporterUpstream
+	}
+	if upstream == nil {
+		writeDatadogAck(w, signal)
+		return
+	}
+
+	resp, err := s.forwardRaw(r.Context(), upstream, normalizedPath, r.URL.RawQuery, r.Method, r.Header, observed.body)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("forwarding failed: %v", err), http.StatusBadGateway)
+		return
+	}
+	defer resp.Body.Close() //nolint:errcheck
+
+	copyResponse(w, resp)
 }
 
 func (s *Service) handleSource(source string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		pair := s.resolvePairForRequest(r, source, "admin")
 		signal := strings.TrimPrefix(r.URL.Path, "/intake/"+source+"/")
 		if signal == "" || strings.Contains(signal, "/") {
 			http.Error(w, "signal must be one of traces, metrics, or logs", http.StatusBadRequest)
 			return
 		}
 
-		observed, result, matched, err := s.captureRequest(source, Signal(signal), "admin", readRequestPath(r), r)
+		translator := pair.ReceiverTranslator
+		if source == "exporter" {
+			translator = pair.ExporterTranslator
+		}
+		observed, result, matched, err := s.captureRequest(pair.ID, translator, source, Signal(signal), "admin", readRequestPath(r), r)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
 
 		response := map[string]any{
+			"pair":           pair.ID,
 			"source":         source,
 			"signal":         signal,
 			"correlation_id": observed.correlation,
@@ -405,15 +687,19 @@ func (s *Service) handleSource(source string) http.HandlerFunc {
 }
 
 func (s *Service) handleProxyIngest(w http.ResponseWriter, r *http.Request) {
+	pair := s.resolvePairForRequest(r, "receiver", ":8126")
 	path := readRequestPath(r)
 	signal := inferSignalFromDatadogPath(path)
-	observed, _, _, err := s.captureRequest("receiver", signal, ":8126", path, r)
+	observed, _, _, err := s.captureRequest(pair.ID, pair.ReceiverTranslator, "receiver", signal, ":8126", path, r)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 
-	upstream := s.receiverUpstream
+	upstream := pair.receiverUpstream
+	if upstream == nil {
+		upstream = s.receiverUpstream
+	}
 	if upstream == nil {
 		writeDatadogAck(w, signal)
 		return
@@ -453,7 +739,7 @@ func (s *Service) observe(payload *observedPayload) (*ComparisonResult, bool) {
 		delete(sh.pending, payload.correlation)
 		s.updatePendingGauge()
 
-		result := comparePair(existing, payload, s.policy)
+		result := comparePair(existing, payload, s.currentPolicy())
 		sh.lastResult[payload.correlation] = result
 		s.recordMetrics(result)
 		return &result, true
@@ -596,7 +882,8 @@ func comparePair(a, b *observedPayload, policy Policy) ComparisonResult {
 func normalizeFieldsForComparison(signal Signal, fields map[string]string) map[string]string {
 	normalized := make(map[string]string, len(fields))
 	for key, value := range fields {
-		normalized[normalizeFieldKeyForComparison(signal, key)] = value
+		normalizedKey := normalizeFieldKeyForComparison(signal, key)
+		normalized[normalizedKey] = normalizeFieldValueForComparison(signal, normalizedKey, value)
 	}
 	return normalized
 }
@@ -611,37 +898,104 @@ func normalizeFieldKeyForComparison(signal Signal, key string) string {
 	return key
 }
 
-func (s *Service) captureRequest(source string, signal Signal, listener, path string, r *http.Request) (*observedPayload, *ComparisonResult, bool, error) {
+func normalizeFieldValueForComparison(signal Signal, key, value string) string {
+	if signal != SignalLogs {
+		return value
+	}
+
+	lowerKey := strings.ToLower(key)
+	switch {
+	case lowerKey == "ddtags" || strings.HasSuffix(lowerKey, ".ddtags"):
+		return stripCorrelationFromDDTags(value)
+	case lowerKey == "message" || strings.HasSuffix(lowerKey, ".message"):
+		return stripCorrelationFromMessageJSON(value)
+	default:
+		return value
+	}
+}
+
+func stripCorrelationFromDDTags(tags string) string {
+	if tags == "" {
+		return tags
+	}
+
+	parts := strings.Split(tags, ",")
+	filtered := make([]string, 0, len(parts))
+	for _, part := range parts {
+		trimmed := strings.TrimSpace(part)
+		kv := strings.SplitN(trimmed, ":", 2)
+		if len(kv) != 2 {
+			if trimmed != "" {
+				filtered = append(filtered, trimmed)
+			}
+			continue
+		}
+		key := strings.TrimSpace(kv[0])
+		if key == "correlation_id" || key == "fidelity.correlation_id" {
+			continue
+		}
+		filtered = append(filtered, trimmed)
+	}
+	return strings.Join(filtered, ",")
+}
+
+func stripCorrelationFromMessageJSON(message string) string {
+	trimmed := strings.TrimSpace(message)
+	if !strings.HasPrefix(trimmed, "{") {
+		return message
+	}
+
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(trimmed), &payload); err != nil {
+		return message
+	}
+	delete(payload, "correlation_id")
+	delete(payload, "fidelity.correlation_id")
+
+	normalized, err := json.Marshal(payload)
+	if err != nil {
+		return message
+	}
+	return string(normalized)
+}
+
+func (s *Service) captureRequest(pairID, translatorID, source string, signal Signal, listener, path string, r *http.Request) (*observedPayload, *ComparisonResult, bool, error) {
 	body, err := io.ReadAll(http.MaxBytesReader(noopResponseWriter{}, r.Body, 10<<20))
 	if err != nil {
 		return nil, nil, false, fmt.Errorf("failed to read body: %w", err)
 	}
 	r.Body = io.NopCloser(bytes.NewReader(body))
 
-	decodedBody, format, err := decodeBody(body, path, r.Header.Get("Content-Encoding"), r.Header.Get("Content-Type"))
-	fields := map[string]string{}
-	decodeError := ""
+	translator, err := s.lookupTranslator(translatorID)
 	if err != nil {
+		return nil, nil, false, err
+	}
+	decoded := translator.Decode(signal, path, r.Header.Get("Content-Encoding"), r.Header.Get("Content-Type"), body)
+	fields := decoded.Attributes
+	if fields == nil {
+		fields = map[string]string{}
+	}
+	effectiveSignal := decoded.Signal
+	if effectiveSignal == SignalUnknown {
+		effectiveSignal = signal
+	}
+	format := decoded.Format
+	if format == "" {
 		format = "raw"
-		decodeError = fmt.Sprintf("failed to decode payload: %v", err)
-	} else {
-		fields = flattenValueMap(decodedBody)
+	}
+	decodeError := decoded.DecodeError
+	if err := validateCanonicalAttributes(fields); err != nil {
+		decodeError = firstNonEmpty(decodeError, fmt.Sprintf("invalid canonical attributes: %v", err))
 	}
 
-	correlationID := deriveCorrelationFromFields(signal, fields)
-	if correlationID == "" {
-		if headerCorrelationID := r.Header.Get("X-Correlation-ID"); headerCorrelationID != "" {
-			correlationID = string(signal) + ":" + headerCorrelationID
-		} else if len(fields) > 0 {
-			correlationID = deriveFingerprintCorrelationID(signal, fields)
-		} else {
-			correlationID = deriveRawBodyCorrelationID(signal, body)
-		}
-	}
+	correlationDecision := resolveCorrelationIDFromDecoded(effectiveSignal, decoded.CorrelationID, fields, r.Header, body)
+	correlationID := correlationDecision.CorrelationID
 
 	observed := &observedPayload{
+		pair:        pairID,
+		translator:  translator.Name(),
 		source:      source,
-		signal:      signal,
+		signal:      effectiveSignal,
 		correlation: correlationID,
 		receivedAt:  time.Now().UTC(),
 		body:        body,
@@ -661,7 +1015,8 @@ func (s *Service) captureRequest(source string, signal Signal, listener, path st
 		flattened: fields,
 	}
 
-	s.receivedTotal.WithLabelValues(source, string(signal)).Inc()
+	s.receivedTotal.WithLabelValues(source, string(effectiveSignal)).Inc()
+	logCorrelationDecision(source, signal, correlationDecision)
 	logObservedPayload(observed)
 	if decodeError != "" {
 		s.rememberObserved(observed)
@@ -672,6 +1027,203 @@ func (s *Service) captureRequest(source string, signal Signal, listener, path st
 		logComparisonSummary(*result)
 	}
 	return observed, result, matched, nil
+}
+
+func (s *Service) lookupTranslator(name string) (PayloadTranslator, error) {
+	if name == "" {
+		name = defaultTranslatorID
+	}
+	s.translatorMu.RLock()
+	translator, ok := s.translators[name]
+	s.translatorMu.RUnlock()
+	if !ok {
+		return nil, fmt.Errorf("unknown translator %q", name)
+	}
+	return translator, nil
+}
+
+func (s *Service) resolvePairForRequest(r *http.Request, source, listener string) configuredPair {
+	requested := strings.TrimSpace(r.Header.Get(pairHeaderKey))
+
+	s.pairMu.RLock()
+	defer s.pairMu.RUnlock()
+
+	if requested != "" {
+		if pair, ok := s.pairs[requested]; ok {
+			return pair
+		}
+		log.Printf("unknown fidelity pair %q, using default pair=%s", requested, s.defaultPair)
+		return s.pairs[s.defaultPair]
+	}
+
+	var (
+		pairID      string
+		matchedPort string
+	)
+	portMap := s.receiverPairByPort
+	if source == "exporter" {
+		portMap = s.exporterPairByPort
+	}
+	for _, port := range requestPortCandidates(r, listener) {
+		if id, ok := portMap[port]; ok {
+			pairID = id
+			matchedPort = port
+			break
+		}
+	}
+	if pairID != "" {
+		if pair, ok := s.pairs[pairID]; ok {
+			log.Printf("resolved fidelity pair from port source=%s port=%s pair=%s", source, matchedPort, pairID)
+			return pair
+		}
+		log.Printf("port mapping matched unknown pair id=%s, using default pair=%s", pairID, s.defaultPair)
+	}
+	return s.pairs[s.defaultPair]
+}
+
+func (s *Service) newConfiguredPair(cfg PairConfig) (configuredPair, error) {
+	id := strings.TrimSpace(cfg.ID)
+	if id == "" {
+		return configuredPair{}, errors.New("pair id is required")
+	}
+	receiverTranslator := strings.TrimSpace(cfg.ReceiverTranslator)
+	if receiverTranslator == "" {
+		receiverTranslator = defaultTranslatorID
+	}
+	if _, err := s.lookupTranslator(receiverTranslator); err != nil {
+		return configuredPair{}, fmt.Errorf("invalid receiver translator: %w", err)
+	}
+	exporterTranslator := strings.TrimSpace(cfg.ExporterTranslator)
+	if exporterTranslator == "" {
+		exporterTranslator = defaultTranslatorID
+	}
+	if _, err := s.lookupTranslator(exporterTranslator); err != nil {
+		return configuredPair{}, fmt.Errorf("invalid exporter translator: %w", err)
+	}
+	receiverUpstream, err := parseOptionalURL(strings.TrimSpace(cfg.ReceiverUpstream))
+	if err != nil {
+		return configuredPair{}, fmt.Errorf("invalid receiver upstream: %w", err)
+	}
+	exporterUpstream, err := parseOptionalURL(strings.TrimSpace(cfg.ExporterUpstream))
+	if err != nil {
+		return configuredPair{}, fmt.Errorf("invalid exporter upstream: %w", err)
+	}
+	receiverPorts, err := normalizePortList(cfg.ReceiverPorts)
+	if err != nil {
+		return configuredPair{}, fmt.Errorf("invalid receiver ports: %w", err)
+	}
+	exporterPorts, err := normalizePortList(cfg.ExporterPorts)
+	if err != nil {
+		return configuredPair{}, fmt.Errorf("invalid exporter ports: %w", err)
+	}
+
+	return configuredPair{
+		PairConfig: PairConfig{
+			ID:                 id,
+			ReceiverTranslator: receiverTranslator,
+			ExporterTranslator: exporterTranslator,
+			ReceiverUpstream:   strings.TrimSpace(cfg.ReceiverUpstream),
+			ExporterUpstream:   strings.TrimSpace(cfg.ExporterUpstream),
+			ReceiverPorts:      receiverPorts,
+			ExporterPorts:      exporterPorts,
+		},
+		receiverUpstream: receiverUpstream,
+		exporterUpstream: exporterUpstream,
+	}, nil
+}
+
+func (s *Service) rebuildPortMappingsLocked() {
+	s.receiverPairByPort = make(map[string]string)
+	s.exporterPairByPort = make(map[string]string)
+	for _, pair := range s.pairs {
+		for _, port := range pair.ReceiverPorts {
+			s.receiverPairByPort[port] = pair.ID
+		}
+		for _, port := range pair.ExporterPorts {
+			s.exporterPairByPort[port] = pair.ID
+		}
+	}
+}
+
+func normalizePortList(rawPorts []string) ([]string, error) {
+	if len(rawPorts) == 0 {
+		return nil, nil
+	}
+	seen := make(map[string]struct{}, len(rawPorts))
+	ports := make([]string, 0, len(rawPorts))
+	for _, raw := range rawPorts {
+		port, ok := canonicalPort(raw)
+		if !ok {
+			return nil, fmt.Errorf("bad port value %q", raw)
+		}
+		if _, exists := seen[port]; exists {
+			continue
+		}
+		seen[port] = struct{}{}
+		ports = append(ports, port)
+	}
+	slices.Sort(ports)
+	return ports, nil
+}
+
+func requestPortCandidates(r *http.Request, listener string) []string {
+	candidates := make([]string, 0, 5)
+	appendCandidate := func(raw string) {
+		if port, ok := canonicalPort(raw); ok {
+			if slices.Contains(candidates, port) {
+				return
+			}
+			candidates = append(candidates, port)
+		}
+	}
+
+	appendCandidate(r.Header.Get("X-Forwarded-Port"))
+	appendCandidate(r.Header.Get("X-Envoy-Original-Dst-Host"))
+	appendCandidate(r.Header.Get("X-Forwarded-Host"))
+	appendCandidate(r.Host)
+	appendCandidate(listener)
+
+	return candidates
+}
+
+func canonicalPort(raw string) (string, bool) {
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		return "", false
+	}
+	if idx := strings.Index(value, ","); idx >= 0 {
+		value = strings.TrimSpace(value[:idx])
+	}
+	value = strings.TrimPrefix(value, ":")
+	if value == "" {
+		return "", false
+	}
+	if _, err := strconv.Atoi(value); err == nil {
+		return value, true
+	}
+	if host, port, err := net.SplitHostPort(value); err == nil {
+		_ = host
+		if _, err := strconv.Atoi(port); err == nil {
+			return port, true
+		}
+	}
+	return "", false
+}
+
+type correlationResolution struct {
+	CorrelationID string
+	Strategy      string
+	Field         string
+	RawValue      string
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func (s *Service) captureDatadogAPIRequest(listener string, r *http.Request) {
@@ -689,6 +1241,8 @@ func (s *Service) captureDatadogAPIRequest(listener string, r *http.Request) {
 	}
 
 	observed := &observedPayload{
+		pair:        defaultPairID,
+		translator:  defaultTranslatorID,
 		source:      "datadog-api",
 		signal:      signal,
 		correlation: "datadog-api:" + string(signal),
@@ -752,12 +1306,93 @@ func flattenValue(result map[string]string, prefix string, value any) {
 }
 
 func deriveCorrelationFromFields(signal Signal, fields map[string]string) string {
+	correlationID, _, _, ok := deriveCorrelationFromFieldsDetailed(signal, fields)
+	if !ok {
+		return ""
+	}
+	return correlationID
+}
+
+func deriveCorrelationFromFieldsDetailed(signal Signal, fields map[string]string) (string, string, string, bool) {
 	for _, key := range correlationCandidates(fields) {
 		if candidate := correlationValueForField(key, fields[key]); candidate != "" {
-			return string(signal) + ":" + candidate
+			return string(signal) + ":" + candidate, key, fields[key], true
 		}
 	}
-	return ""
+	return "", "", "", false
+}
+
+func resolveCorrelationIDFromDecoded(signal Signal, translatorCorrelationID string, fields map[string]string, headers http.Header, body []byte) correlationResolution {
+	if translatorCorrelationID = strings.TrimSpace(translatorCorrelationID); translatorCorrelationID != "" {
+		return correlationResolution{
+			CorrelationID: string(signal) + ":" + translatorCorrelationID,
+			Strategy:      "translator",
+			Field:         "correlation_id",
+			RawValue:      translatorCorrelationID,
+		}
+	}
+	return resolveCorrelationID(signal, fields, headers, body)
+}
+
+func resolveCorrelationID(signal Signal, fields map[string]string, headers http.Header, body []byte) correlationResolution {
+	if headerKey, headerValue := firstHeaderValue(headers, "X-Correlation-ID", "X-Fidelity-ID", "X-Request-ID"); headerValue != "" {
+		return correlationResolution{
+			CorrelationID: string(signal) + ":" + headerValue,
+			Strategy:      "header",
+			Field:         headerKey,
+			RawValue:      headerValue,
+		}
+	}
+	if correlationID, field, rawValue, ok := deriveCorrelationFromFieldsDetailed(signal, fields); ok {
+		return correlationResolution{
+			CorrelationID: correlationID,
+			Strategy:      "field",
+			Field:         field,
+			RawValue:      rawValue,
+		}
+	}
+	if len(fields) > 0 {
+		return correlationResolution{
+			CorrelationID: deriveFingerprintCorrelationID(signal, fields),
+			Strategy:      "fingerprint",
+		}
+	}
+	return correlationResolution{
+		CorrelationID: deriveRawBodyCorrelationID(signal, body),
+		Strategy:      "raw_body",
+	}
+}
+
+func firstHeaderValue(headers http.Header, keys ...string) (string, string) {
+	for _, key := range keys {
+		if value := headers.Get(key); value != "" {
+			return key, value
+		}
+	}
+	return "", ""
+}
+
+func logCorrelationDecision(source string, signal Signal, decision correlationResolution) {
+	switch decision.Strategy {
+	case "field", "header":
+		log.Printf(
+			"correlation selection source=%s signal=%s strategy=%s key=%s raw_value=%q correlation_id=%s",
+			source,
+			signal,
+			decision.Strategy,
+			decision.Field,
+			decision.RawValue,
+			decision.CorrelationID,
+		)
+	default:
+		log.Printf(
+			"correlation selection source=%s signal=%s strategy=%s correlation_id=%s",
+			source,
+			signal,
+			decision.Strategy,
+			decision.CorrelationID,
+		)
+	}
 }
 
 func deriveFingerprintCorrelationID(signal Signal, fields map[string]string) string {
@@ -814,6 +1449,37 @@ func inferSignalFromDatadogPath(path string) Signal {
 	}
 }
 
+func parseExporterPath(rawPath string) (exporter string, normalizedPath string) {
+	path := strings.TrimSpace(rawPath)
+	if path == "" {
+		return "", "/"
+	}
+	if !strings.HasPrefix(path, "/") {
+		path = "/" + path
+	}
+
+	segments := strings.FieldsFunc(path, func(r rune) bool { return r == '/' })
+	if len(segments) < 2 {
+		return "", path
+	}
+
+	if segments[0] == "exporter" && len(segments) >= 2 {
+		exporter = strings.ToLower(strings.TrimSpace(segments[1]))
+		if len(segments) == 2 {
+			return exporter, "/"
+		}
+		return exporter, "/" + strings.Join(segments[2:], "/")
+	}
+
+	switch segments[0] {
+	case "api", "v0.2", "v0.3", "v0.4", "v0.5", "v1", "v2":
+		return "", path
+	default:
+		exporter = strings.ToLower(strings.TrimSpace(segments[0]))
+		return exporter, "/" + strings.Join(segments[1:], "/")
+	}
+}
+
 func inferDatadogAPISignal(path string) Signal {
 	switch path {
 	case "/api/v1/validate":
@@ -834,11 +1500,7 @@ func decodeBody(body []byte, path, contentEncoding, contentType string) (any, st
 	}
 
 	if strings.Contains(strings.ToLower(contentType), "protobuf") {
-		payload, protoFormat, err := decodeDatadogProtobuf(path, decoded)
-		if err != nil {
-			return nil, "", err
-		}
-		return payload, protoFormat, nil
+		return nil, "", fmt.Errorf("protobuf payloads are not supported in config-mapping mode")
 	}
 
 	if looksLikeJSON(decoded) || strings.Contains(strings.ToLower(contentType), "json") {
@@ -872,44 +1534,6 @@ func decodeCompression(body []byte, contentEncoding string) ([]byte, error) {
 	}
 }
 
-func decodeDatadogProtobuf(path string, body []byte) (any, string, error) {
-	switch {
-	case strings.HasSuffix(path, "/api/v2/series"):
-		payload := &agentpayload.MetricPayload{}
-		if err := payload.Unmarshal(body); err != nil {
-			return nil, "", err
-		}
-		return protobufToMap(payload)
-	case strings.HasSuffix(path, "/api/v1/sketches"), strings.HasSuffix(path, "/api/beta/sketches"):
-		payload := &agentpayload.SketchPayload{}
-		if err := payload.Unmarshal(body); err != nil {
-			return nil, "", err
-		}
-		return protobufToMap(payload)
-	case strings.HasSuffix(path, "/api/v0.2/traces"):
-		payload := &tracepb.AgentPayload{}
-		if err := payload.UnmarshalVT(body); err != nil {
-			return nil, "", err
-		}
-		return protobufToMap(payload)
-	default:
-		return nil, "", fmt.Errorf("unsupported protobuf path %q", path)
-	}
-}
-
-func protobufToMap(message any) (map[string]any, string, error) {
-	body, err := json.Marshal(message)
-	if err != nil {
-		return nil, "", err
-	}
-
-	var payload map[string]any
-	if err := json.Unmarshal(body, &payload); err != nil {
-		return nil, "", err
-	}
-	return payload, "protobuf", nil
-}
-
 func normalizeMsgpackValue(value any) any {
 	switch typed := value.(type) {
 	case map[string]any:
@@ -938,18 +1562,10 @@ func normalizeMsgpackValue(value any) any {
 
 func correlationCandidates(fields map[string]string) []string {
 	exact := []string{
-		"meta.correlation_id",
-		"meta.fidelity.correlation_id",
-		"attributes.correlation_id",
-		"attributes.fidelity.correlation_id",
 		"correlation_id",
+		"fidelity_correlation_id",
 		"fidelity.correlation_id",
 		"trace_id",
-		"resource.trace_id",
-		"span.trace_id",
-		"0.trace_id",
-		"resource.correlation_id",
-		"resource.fidelity.correlation_id",
 	}
 
 	keys := make([]string, 0, len(fields))
@@ -982,35 +1598,12 @@ func correlationCandidates(fields map[string]string) []string {
 			strings.Contains(lower, ".correlation_id."),
 			strings.HasSuffix(lower, ".fidelity.correlation_id"),
 			strings.Contains(lower, "correlationid"),
-			strings.Contains(lower, "meta.correlation_id"),
-			strings.Contains(lower, ".attributes.correlation_id"),
-			strings.Contains(lower, ".attributes.fidelity.correlation_id"),
 			strings.HasSuffix(lower, ".ddtags"),
 			lower == "ddtags",
 			strings.Contains(lower, ".tags[") && strings.Contains(valueLower, "correlation_id:"):
-			if strings.Contains(lower, ".resource.") || strings.HasPrefix(lower, "resource.") {
-				continue
-			}
 			add(key)
 		default:
 		}
-	}
-
-	for _, key := range keys {
-		lower := strings.ToLower(key)
-		switch {
-		case strings.HasSuffix(lower, ".trace_id"),
-			strings.Contains(lower, ".resource.correlation_id"),
-			strings.Contains(lower, ".resource.fidelity.correlation_id"),
-			strings.HasPrefix(lower, "resource.correlation_id"),
-			strings.HasPrefix(lower, "resource.fidelity.correlation_id"):
-			add(key)
-		default:
-		}
-	}
-
-	for _, key := range []string{"series[0].metric"} {
-		add(key)
 	}
 
 	return candidates
@@ -1087,6 +1680,13 @@ func selectedHeaders(header http.Header) map[string]string {
 		"Datadog-Meta-Lang",
 		"Datadog-Meta-Lang-Version",
 		"X-Correlation-ID",
+		"X-Fidelity-ID",
+		"X-Fidelity-Pair",
+		"X-Request-ID",
+		"Host",
+		"X-Forwarded-Port",
+		"X-Forwarded-Host",
+		"X-Envoy-Original-Dst-Host",
 	}
 
 	out := make(map[string]string)
@@ -1202,6 +1802,8 @@ func debugPayloadFromObserved(payload *observedPayload) DebugPayload {
 	}
 
 	return DebugPayload{
+		Pair:          payload.pair,
+		Translator:    payload.translator,
 		Source:        payload.source,
 		Signal:        payload.signal,
 		CorrelationID: payload.correlation,

@@ -113,3 +113,63 @@ func TestBuildRequestWithCorrelationAndDropsPreservesCorrelationTags(t *testing.
 		t.Fatalf("expected correlation_id tag in %#v", tags)
 	}
 }
+
+func TestBuildRequestWithoutCorrelationID(t *testing.T) {
+	req, err := BuildRequest(Options{
+		Signal:          SignalMetrics,
+		Encoding:        EncodingJSON,
+		OmitCorrelation: true,
+	})
+	if err != nil {
+		t.Fatalf("BuildRequest error: %v", err)
+	}
+	if req.CorrelationID != "" {
+		t.Fatalf("expected empty correlation id, got %q", req.CorrelationID)
+	}
+
+	var payload map[string]any
+	if err := json.Unmarshal(req.Body, &payload); err != nil {
+		t.Fatalf("json unmarshal: %v", err)
+	}
+	series := payload["series"].([]any)
+	entry := series[0].(map[string]any)
+	tags := entry["tags"].([]any)
+	for _, tag := range tags {
+		tagValue := tag.(string)
+		if strings.HasPrefix(tagValue, "correlation_id:") || strings.HasPrefix(tagValue, "fidelity.correlation_id:") {
+			t.Fatalf("expected no correlation tags, got %#v", tags)
+		}
+	}
+}
+
+func TestBuildLogsWithoutCorrelationID(t *testing.T) {
+	req, err := BuildRequest(Options{
+		Signal:          SignalLogs,
+		Encoding:        EncodingJSON,
+		OmitCorrelation: true,
+	})
+	if err != nil {
+		t.Fatalf("BuildRequest error: %v", err)
+	}
+	if req.CorrelationID != "" {
+		t.Fatalf("expected empty correlation id, got %q", req.CorrelationID)
+	}
+
+	var payload map[string]any
+	if err := json.Unmarshal(req.Body, &payload); err != nil {
+		t.Fatalf("json unmarshal: %v", err)
+	}
+	if _, ok := payload["correlation_id"]; ok {
+		t.Fatalf("did not expect correlation_id in payload: %#v", payload)
+	}
+	if tags, ok := payload["ddtags"].(string); !ok || strings.Contains(tags, "correlation_id:") || strings.Contains(tags, "fidelity.correlation_id:") {
+		t.Fatalf("did not expect correlation tags in ddtags=%q", payload["ddtags"])
+	}
+	attrs, ok := payload["attributes"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected attributes map, got %#v", payload["attributes"])
+	}
+	if _, ok := attrs["fidelity.correlation_id"]; ok {
+		t.Fatalf("did not expect fidelity.correlation_id in attributes: %#v", attrs)
+	}
+}

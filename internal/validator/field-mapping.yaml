@@ -1,0 +1,73 @@
+signals:
+  logs:
+    message:
+      - message
+      - "[0].message|json:message"
+      - "[0].message"
+    service:
+      - service
+      - "[0].service"
+      - "[0].message|json:service"
+    timestamp:
+      - timestamp
+      - "[0].timestamp"
+      - "[0].message|json:timestamp"
+    status:
+      - status
+      - "[0].status"
+      - "[0].message|json:status"
+    hostname:
+      - hostname
+      - "[0].hostname"
+      - "[0].message|json:hostname"
+    ddsource:
+      - ddsource
+      - "[0].ddsource"
+      - "[0].message|json:ddsource"
+    correlation_id:
+      - correlation_id
+      - "[0].message|json:correlation_id"
+      - "[0].ddtags|tag:correlation_id"
+      - "ddtags|tag:correlation_id"
+    fidelity_correlation_id:
+      - fidelity_correlation_id
+      - "fidelity.correlation_id"
+      - "[0].message|json:fidelity_correlation_id"
+      - "[0].message|json:fidelity.correlation_id"
+      - "[0].ddtags|tag:fidelity_correlation_id"
+      - "ddtags|tag:fidelity_correlation_id"
+  traces:
+    trace_id:
+      - trace_id
+      - "suffix:.trace_id"
+      - "suffix:.traceID"
+    span_id:
+      - span_id
+      - "suffix:.span_id"
+      - "suffix:.spanID"
+    service:
+      - service
+      - "suffix:.service"
+    operation:
+      - operation
+      - "suffix:.name"
+      - "suffix:.operation"
+      - "suffix:.resource"
+  metrics:
+    metric_name:
+      - metric_name
+      - "suffix:.metric"
+    point_timestamp:
+      - point_timestamp
+      - "suffix:][0]"
+      - "suffix:.timestamp"
+    point_value:
+      - point_value
+      - "suffix:][1]"
+      - "suffix:.value"
+    service:
+      - service
+      - "contains:.tags[|tag:service"
+    env:
+      - env
+      - "contains:.tags[|tag:env"

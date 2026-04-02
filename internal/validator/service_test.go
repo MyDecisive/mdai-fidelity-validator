@@ -5,6 +5,8 @@ import (
 	"compress/gzip"
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -181,10 +183,32 @@ func TestInferSignalFromDatadogPath(t *testing.T) {
 	}
 }
 
+func TestParseExporterPath(t *testing.T) {
+	cases := []struct {
+		path           string
+		wantExporter   string
+		wantNormalized string
+	}{
+		{path: "/api/v2/logs", wantExporter: "", wantNormalized: "/api/v2/logs"},
+		{path: "/exporter/datadog/api/v2/logs", wantExporter: "datadog", wantNormalized: "/api/v2/logs"},
+		{path: "/exporter/datadog", wantExporter: "datadog", wantNormalized: "/"},
+		{path: "/splunk/services/collector/event", wantExporter: "splunk", wantNormalized: "/services/collector/event"},
+	}
+
+	for _, tc := range cases {
+		gotExporter, gotNormalized := parseExporterPath(tc.path)
+		if gotExporter != tc.wantExporter || gotNormalized != tc.wantNormalized {
+			t.Fatalf("parseExporterPath(%q)=(%q,%q) want (%q,%q)", tc.path, gotExporter, gotNormalized, tc.wantExporter, tc.wantNormalized)
+		}
+	}
+}
+
 func TestSelectedHeaders(t *testing.T) {
 	header := http.Header{}
 	header.Set("Content-Type", "application/msgpack")
 	header.Set("Dd-Api-Key", "secret")
+	header.Set("X-Fidelity-ID", "fid-1")
+	header.Set("X-Request-ID", "req-1")
 	header.Set("X-Unused", "ignored")
 
 	got := selectedHeaders(header)
@@ -194,8 +218,50 @@ func TestSelectedHeaders(t *testing.T) {
 	if got["DD-API-KEY"] != "secret" {
 		t.Fatalf("unexpected dd api key: %#v", got)
 	}
+	if got["X-Fidelity-ID"] != "fid-1" {
+		t.Fatalf("unexpected x-fidelity-id: %#v", got)
+	}
+	if got["X-Request-ID"] != "req-1" {
+		t.Fatalf("unexpected x-request-id: %#v", got)
+	}
 	if _, ok := got["X-Unused"]; ok {
 		t.Fatalf("unexpected x-unused in %#v", got)
+	}
+}
+
+func TestResolveCorrelationIDFromHeaderFallbacks(t *testing.T) {
+	fields := map[string]string{}
+	body := []byte(`{"message":"hello"}`)
+
+	t.Run("x-fidelity-id", func(t *testing.T) {
+		headers := http.Header{}
+		headers.Set("X-Fidelity-ID", "fid-123")
+		got := resolveCorrelationID(SignalLogs, fields, headers, body)
+		if got.CorrelationID != "logs:fid-123" || got.Strategy != "header" || got.Field != "X-Fidelity-ID" {
+			t.Fatalf("unexpected decision: %+v", got)
+		}
+	})
+
+	t.Run("x-request-id", func(t *testing.T) {
+		headers := http.Header{}
+		headers.Set("X-Request-ID", "req-123")
+		got := resolveCorrelationID(SignalLogs, fields, headers, body)
+		if got.CorrelationID != "logs:req-123" || got.Strategy != "header" || got.Field != "X-Request-ID" {
+			t.Fatalf("unexpected decision: %+v", got)
+		}
+	})
+}
+
+func TestResolveCorrelationIDPrefersHeaderOverField(t *testing.T) {
+	fields := map[string]string{
+		"correlation_id": "from-field",
+	}
+	headers := http.Header{}
+	headers.Set("X-Correlation-ID", "from-header")
+
+	got := resolveCorrelationID(SignalLogs, fields, headers, []byte(`{"message":"hello"}`))
+	if got.CorrelationID != "logs:from-header" || got.Strategy != "header" || got.Field != "X-Correlation-ID" {
+		t.Fatalf("unexpected decision: %+v", got)
 	}
 }
 
@@ -251,5 +317,155 @@ func TestComparePairNormalizesSingleLogArrayPrefix(t *testing.T) {
 	}
 	if len(result.Matched) != 2 {
 		t.Fatalf("expected 2 matched fields, got %d", len(result.Matched))
+	}
+}
+
+func TestComparePairStripsCorrelationFromLogDDTags(t *testing.T) {
+	receiver := &observedPayload{
+		source:      "receiver",
+		signal:      "logs",
+		correlation: "logs:corr-1",
+		receivedAt:  time.Now(),
+		flattened: map[string]string{
+			"ddtags": "env:dev,correlation_id:corr-a,fidelity.correlation_id:corr-a,otel_source:datadog_exporter",
+		},
+	}
+	exporter := &observedPayload{
+		source:      "exporter",
+		signal:      "logs",
+		correlation: "logs:corr-1",
+		receivedAt:  time.Now(),
+		flattened: map[string]string{
+			"[0].ddtags": "env:dev,correlation_id:corr-b,fidelity.correlation_id:corr-b,otel_source:datadog_exporter",
+		},
+	}
+
+	result := comparePair(receiver, exporter, Policy{})
+	if !result.FullPayloadPassed {
+		t.Fatalf("expected full payload pass, got %#v", result)
+	}
+}
+
+func TestComparePairStripsCorrelationFromLogMessageJSON(t *testing.T) {
+	receiver := &observedPayload{
+		source:      "receiver",
+		signal:      "logs",
+		correlation: "logs:corr-1",
+		receivedAt:  time.Now(),
+		flattened: map[string]string{
+			"message": `{"message":"ddgen synthetic log event","service":"ddgen-svc","correlation_id":"corr-a"}`,
+		},
+	}
+	exporter := &observedPayload{
+		source:      "exporter",
+		signal:      "logs",
+		correlation: "logs:corr-1",
+		receivedAt:  time.Now(),
+		flattened: map[string]string{
+			"[0].message": `{"service":"ddgen-svc","correlation_id":"corr-b","message":"ddgen synthetic log event"}`,
+		},
+	}
+
+	result := comparePair(receiver, exporter, Policy{})
+	if !result.FullPayloadPassed {
+		t.Fatalf("expected full payload pass, got %#v", result)
+	}
+}
+
+func TestResolvePairForRequest(t *testing.T) {
+	svc := &Service{
+		defaultPair: defaultPairID,
+		pairs: map[string]configuredPair{
+			defaultPairID: {
+				PairConfig: PairConfig{
+					ID:                 defaultPairID,
+					ReceiverTranslator: defaultTranslatorID,
+					ExporterTranslator: defaultTranslatorID,
+				},
+			},
+			"shadow-a": {
+				PairConfig: PairConfig{
+					ID:                 "shadow-a",
+					ReceiverTranslator: defaultTranslatorID,
+					ExporterTranslator: defaultTranslatorID,
+					ReceiverPorts:      []string{"18126"},
+				},
+			},
+		},
+		receiverPairByPort: map[string]string{"18126": "shadow-a"},
+		exporterPairByPort: map[string]string{},
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v0.4/traces", nil)
+	gotDefault := svc.resolvePairForRequest(req, "receiver", ":8126")
+	if gotDefault.ID != defaultPairID {
+		t.Fatalf("expected default pair %q, got %q", defaultPairID, gotDefault.ID)
+	}
+
+	req.Header.Set("X-Forwarded-Port", "18126")
+	gotPortMapped := svc.resolvePairForRequest(req, "receiver", ":8126")
+	if gotPortMapped.ID != "shadow-a" {
+		t.Fatalf("expected port-mapped pair shadow-a, got %q", gotPortMapped.ID)
+	}
+
+	req.Header.Set(pairHeaderKey, "shadow-a")
+	gotNamed := svc.resolvePairForRequest(req, "receiver", ":8126")
+	if gotNamed.ID != "shadow-a" {
+		t.Fatalf("expected pair shadow-a, got %q", gotNamed.ID)
+	}
+}
+
+func TestHandleAdminPairs(t *testing.T) {
+	svc := &Service{
+		defaultPair: defaultPairID,
+		translators: map[string]PayloadTranslator{
+			defaultTranslatorID: datadogRawTranslator{mapping: newMappingStore(defaultFieldMapping())},
+		},
+		pairs: map[string]configuredPair{
+			defaultPairID: {
+				PairConfig: PairConfig{
+					ID:                 defaultPairID,
+					ReceiverTranslator: defaultTranslatorID,
+					ExporterTranslator: defaultTranslatorID,
+				},
+			},
+		},
+	}
+
+	body := `{"id":"shadow-b","receiver_translator":"datadog_raw","exporter_translator":"datadog_raw","receiver_upstream":"http://receiver.example:8126","exporter_upstream":"http://exporter.example:8081","default":true}`
+	req := httptest.NewRequest(http.MethodPost, "/admin/pairs", strings.NewReader(body))
+	rec := httptest.NewRecorder()
+
+	svc.handleAdminPairs(rec, req)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusAccepted, rec.Code, rec.Body.String())
+	}
+
+	pair, ok := svc.pairs["shadow-b"]
+	if !ok {
+		t.Fatal("expected pair shadow-b to be saved")
+	}
+	if pair.receiverUpstream == nil || pair.receiverUpstream.String() != "http://receiver.example:8126" {
+		t.Fatalf("unexpected receiver upstream: %+v", pair.receiverUpstream)
+	}
+	if pair.exporterUpstream == nil || pair.exporterUpstream.String() != "http://exporter.example:8081" {
+		t.Fatalf("unexpected exporter upstream: %+v", pair.exporterUpstream)
+	}
+	if svc.defaultPair != "shadow-b" {
+		t.Fatalf("expected default pair shadow-b, got %q", svc.defaultPair)
+	}
+
+	body = `{"id":"shadow-c","receiver_translator":"datadog_raw","exporter_translator":"datadog_raw","receiver_ports":["18126"],"exporter_ports":["18081"]}`
+	req = httptest.NewRequest(http.MethodPost, "/admin/pairs", strings.NewReader(body))
+	rec = httptest.NewRecorder()
+	svc.handleAdminPairs(rec, req)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusAccepted, rec.Code, rec.Body.String())
+	}
+	if got := svc.receiverPairByPort["18126"]; got != "shadow-c" {
+		t.Fatalf("expected receiver port mapping to shadow-c, got %q", got)
+	}
+	if got := svc.exporterPairByPort["18081"]; got != "shadow-c" {
+		t.Fatalf("expected exporter port mapping to shadow-c, got %q", got)
 	}
 }

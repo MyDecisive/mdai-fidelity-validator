@@ -1,8 +1,6 @@
 package validator
 
 import (
-	_ "embed"
-	"encoding/json"
 	"fmt"
 	"os"
 	"slices"
@@ -13,12 +11,8 @@ import (
 )
 
 const (
-	defaultPolicyPath = "fidelity-policy.yaml"
-	policyPathEnvVar  = "MDAI_FIDELITY_POLICY_PATH"
+	policyPathEnvVar = "MDAI_FIDELITY_POLICY_PATH"
 )
-
-//go:embed fidelity-policy.yaml
-var embeddedPolicy []byte
 
 type Signal string
 
@@ -36,7 +30,53 @@ type Policy struct {
 }
 
 type SignalPolicy struct {
-	RequiredAttributes []string `yaml:"required_attributes"` //nolint:tagliatelle
+	RequiredAttributes []RequiredAttributePolicy `yaml:"required_attributes"` //nolint:tagliatelle
+}
+
+type RequiredAttributePolicy struct {
+	Name    string `yaml:"name"`
+	Compare string `yaml:"compare,omitempty"`
+}
+
+func (r *RequiredAttributePolicy) UnmarshalYAML(node *yaml.Node) error {
+	switch node.Kind {
+	case yaml.ScalarNode:
+		var value string
+		if err := node.Decode(&value); err != nil {
+			return err
+		}
+		r.Name = strings.TrimSpace(value)
+		r.Compare = ""
+		return nil
+	case yaml.MappingNode:
+		var raw struct {
+			Name      string `yaml:"name"`
+			Attribute string `yaml:"attribute"`
+			Compare   string `yaml:"compare"`
+		}
+		if err := node.Decode(&raw); err != nil {
+			return err
+		}
+		name := strings.TrimSpace(raw.Name)
+		if name == "" {
+			name = strings.TrimSpace(raw.Attribute)
+		}
+		if name == "" {
+			return fmt.Errorf("required attribute entry missing name/attribute")
+		}
+		r.Name = name
+		r.Compare = strings.TrimSpace(raw.Compare)
+		return nil
+	default:
+		return fmt.Errorf("unsupported required attribute entry kind %d", node.Kind)
+	}
+}
+
+func (r RequiredAttributePolicy) compareMode() string {
+	if strings.EqualFold(r.Compare, "presence_only") {
+		return "presence_only"
+	}
+	return "value"
 }
 
 type RequiredAttributeCheck struct {
@@ -65,26 +105,6 @@ func loadPolicy() (Policy, string, error) {
 		return policy, fmt.Sprintf("file:%s (via %s)", configuredPath, policyPathEnvVar), nil
 	}
 
-	body, err := os.ReadFile(defaultPolicyPath)
-	if err == nil {
-		err = yaml.Unmarshal(body, &policy)
-		if err != nil {
-			return Policy{}, "", err
-		}
-		return policy, "file:" + defaultPolicyPath, nil
-	}
-	if !os.IsNotExist(err) {
-		return Policy{}, "", err
-	}
-
-	if len(embeddedPolicy) > 0 {
-		err = yaml.Unmarshal(embeddedPolicy, &policy)
-		if err != nil {
-			return Policy{}, "", err
-		}
-		return policy, "embedded:internal/validator/fidelity-policy.yaml", nil
-	}
-
 	return policy, "builtin-defaults", nil
 }
 
@@ -92,26 +112,26 @@ func defaultPolicy() Policy {
 	return Policy{
 		Signals: map[Signal]SignalPolicy{
 			SignalMetrics: {
-				RequiredAttributes: []string{
-					"metric_name",
-					"service",
-					"env",
-					"point_timestamp",
-					"point_value",
+				RequiredAttributes: []RequiredAttributePolicy{
+					{Name: "metric_name"},
+					{Name: "service"},
+					{Name: "env"},
+					{Name: "point_timestamp"},
+					{Name: "point_value"},
 				},
 			},
 			SignalTraces: {
-				RequiredAttributes: []string{
-					"trace_id",
-					"span_id",
-					"service",
-					"operation",
+				RequiredAttributes: []RequiredAttributePolicy{
+					{Name: "trace_id"},
+					{Name: "span_id"},
+					{Name: "service"},
+					{Name: "operation"},
 				},
 			},
 			SignalLogs: {
-				RequiredAttributes: []string{
-					"message",
-					"service",
+				RequiredAttributes: []RequiredAttributePolicy{
+					{Name: "message"},
+					{Name: "service"},
 				},
 			},
 		},
@@ -127,8 +147,8 @@ func evaluatePolicy(signal Signal, receiver, exporter map[string]string, policy 
 	checks := make([]RequiredAttributeCheck, 0, len(signalPolicy.RequiredAttributes))
 	allPassed := true
 
-	for _, attribute := range signalPolicy.RequiredAttributes {
-		check := evaluateAttributeDeep(signal, attribute, receiver, exporter)
+	for _, required := range signalPolicy.RequiredAttributes {
+		check := evaluateAttributeDeep(signal, required, receiver, exporter)
 		checks = append(checks, check)
 		if !check.Passed {
 			allPassed = false
@@ -138,17 +158,53 @@ func evaluatePolicy(signal Signal, receiver, exporter map[string]string, policy 
 	return checks, allPassed
 }
 
-func evaluateAttributeDeep(signal Signal, attribute string, receiver, exporter map[string]string) RequiredAttributeCheck {
-	if signal == SignalLogs {
-		return evaluateLogAttribute(attribute, receiver, exporter)
+func evaluateAttributeDeep(signal Signal, required RequiredAttributePolicy, receiver, exporter map[string]string) RequiredAttributeCheck {
+	attribute := required.Name
+	presenceOnly := required.compareMode() == "presence_only"
+	check := RequiredAttributeCheck{
+		Attribute:   attribute,
+		Passed:      true,
+		TotalItems:  1,
+		PassedItems: 1,
 	}
 
+	receiverValue, receiverOK := lookupRequiredAttribute(attribute, receiver)
+	if !receiverOK {
+		if signal != SignalLogs {
+			return evaluateAttributeDeepLegacy(signal, attribute, receiver, exporter, presenceOnly)
+		}
+		check.Passed = false
+		check.PassedItems = 0
+		check.Reason = "missing_in_receiver"
+		return check
+	}
+
+	exporterValue, exporterOK := lookupRequiredAttribute(attribute, exporter)
+	if !exporterOK {
+		check.Passed = false
+		check.PassedItems = 0
+		check.Reason = "missing_in_exporter"
+		check.Receiver = receiverValue
+		return check
+	}
+
+	if !presenceOnly && receiverValue != exporterValue {
+		check.Passed = false
+		check.PassedItems = 0
+		check.Reason = "value_mismatch"
+		check.Receiver = receiverValue
+		check.Exporter = exporterValue
+	}
+
+	return check
+}
+
+func evaluateAttributeDeepLegacy(signal Signal, attribute string, receiver, exporter map[string]string, presenceOnly bool) RequiredAttributeCheck {
 	check := RequiredAttributeCheck{
 		Attribute: attribute,
 		Passed:    true,
 	}
 
-	// 1. Identify all keys in the receiver that match this attribute pattern
 	receiverKeys := findKeysForAttribute(signal, attribute, receiver)
 	if len(receiverKeys) == 0 {
 		check.Passed = false
@@ -157,15 +213,9 @@ func evaluateAttributeDeep(signal Signal, attribute string, receiver, exporter m
 	}
 
 	check.TotalItems = len(receiverKeys)
-
-	// 2. For every key found in the receiver, verify it exists and matches in the exporter
 	for _, rKey := range receiverKeys {
 		rVal := receiver[rKey]
-
-		// Map the receiver key to the corresponding exporter key
-		// Usually they are identical if the mirroring is 1:1
 		eVal, ok := exporter[rKey]
-
 		if !ok {
 			check.Passed = false
 			if check.MismatchedAt == "" {
@@ -175,8 +225,7 @@ func evaluateAttributeDeep(signal Signal, attribute string, receiver, exporter m
 			}
 			continue
 		}
-
-		if rVal != eVal {
+		if !presenceOnly && rVal != eVal {
 			check.Passed = false
 			if check.MismatchedAt == "" {
 				check.MismatchedAt = rKey
@@ -186,46 +235,8 @@ func evaluateAttributeDeep(signal Signal, attribute string, receiver, exporter m
 			}
 			continue
 		}
-
 		check.PassedItems++
 	}
-
-	return check
-}
-
-func evaluateLogAttribute(attribute string, receiver, exporter map[string]string) RequiredAttributeCheck {
-	check := RequiredAttributeCheck{
-		Attribute:   attribute,
-		Passed:      true,
-		TotalItems:  1,
-		PassedItems: 1,
-	}
-
-	receiverValue, receiverOK := extractLogAttribute(attribute, receiver)
-	if !receiverOK {
-		check.Passed = false
-		check.PassedItems = 0
-		check.Reason = "missing_in_receiver"
-		return check
-	}
-
-	exporterValue, exporterOK := extractLogAttribute(attribute, exporter)
-	if !exporterOK {
-		check.Passed = false
-		check.PassedItems = 0
-		check.Reason = "missing_in_exporter"
-		check.Receiver = receiverValue
-		return check
-	}
-
-	if receiverValue != exporterValue {
-		check.Passed = false
-		check.PassedItems = 0
-		check.Reason = "value_mismatch"
-		check.Receiver = receiverValue
-		check.Exporter = exporterValue
-	}
-
 	return check
 }
 
@@ -299,116 +310,21 @@ func collectMatchingKeys(fields map[string]string, match func(key, value string)
 	return keys
 }
 
-func nestedJSONField(fields map[string]string, key, nestedField string) (string, bool) {
-	raw := fields[key]
-	if raw == "" || !strings.HasPrefix(strings.TrimSpace(raw), "{") {
-		return "", false
-	}
-
-	var payload map[string]any
-	if err := json.Unmarshal([]byte(raw), &payload); err != nil {
-		return "", false
-	}
-	value, ok := payload[nestedField]
-	if !ok {
-		return "", false
-	}
-	return strings.TrimSpace(strings.ReplaceAll(strings.Trim(fmtValue(value), "\""), "\n", " ")), true
-}
-
-func fmtValue(value any) string {
-	switch typed := value.(type) {
-	case string:
-		return typed
-	default:
-		return strings.TrimSpace(strings.ReplaceAll(strings.TrimSpace(toJSONScalar(typed)), "\n", " "))
-	}
-}
-
-func toJSONScalar(value any) string {
-	body, err := json.Marshal(value)
-	if err != nil {
-		return ""
-	}
-	return string(body)
-}
-
-func extractLogAttribute(attribute string, fields map[string]string) (string, bool) {
-	keys := sortedFieldKeys(fields)
-	if value, ok := extractLogAttributeFromNestedMessage(attribute, fields, keys); ok {
+func lookupRequiredAttribute(attribute string, fields map[string]string) (string, bool) {
+	if value, ok := fields[attribute]; ok {
 		return value, true
 	}
-	if value, ok := extractLogAttributeDirect(attribute, fields, keys); ok {
-		return value, true
-	}
-	return extractLogAttributeFromDDTags(attribute, fields, keys)
-}
-
-func sortedFieldKeys(fields map[string]string) []string {
-	keys := make([]string, 0, len(fields))
-	for k := range fields {
-		keys = append(keys, k)
-	}
-	slices.Sort(keys)
-	return keys
-}
-
-func extractLogAttributeFromNestedMessage(attribute string, fields map[string]string, keys []string) (string, bool) {
-	for _, k := range keys {
-		if k == "message" || strings.HasSuffix(k, ".message") {
-			if val, ok := nestedJSONField(fields, k, attribute); ok {
-				return val, true
-			}
+	switch attribute {
+	case "fidelity_correlation_id":
+		if value, ok := fields["fidelity.correlation_id"]; ok {
+			return value, true
+		}
+	case "fidelity.correlation_id":
+		if value, ok := fields["fidelity_correlation_id"]; ok {
+			return value, true
 		}
 	}
 	return "", false
-}
-
-func extractLogAttributeDirect(attribute string, fields map[string]string, keys []string) (string, bool) {
-	for _, k := range keys {
-		if k == attribute || strings.HasSuffix(k, "."+attribute) {
-			return fields[k], true
-		}
-		if attribute == "fidelity_correlation_id" && (k == "fidelity.correlation_id" || strings.HasSuffix(k, ".fidelity.correlation_id")) {
-			return fields[k], true
-		}
-	}
-	return "", false
-}
-
-func extractLogAttributeFromDDTags(attribute string, fields map[string]string, keys []string) (string, bool) {
-	for _, k := range keys {
-		if k == "ddtags" || strings.HasSuffix(k, ".ddtags") {
-			if value, ok := findAttributeInDDTags(attribute, fields[k]); ok {
-				return value, true
-			}
-		}
-	}
-	return "", false
-}
-
-func findAttributeInDDTags(attribute, ddtags string) (string, bool) {
-	for tag := range strings.SplitSeq(ddtags, ",") {
-		key, val, ok := parseTagKV(tag)
-		if !ok {
-			continue
-		}
-		if key == attribute {
-			return val, true
-		}
-		if attribute == "fidelity_correlation_id" && key == "fidelity.correlation_id" {
-			return val, true
-		}
-	}
-	return "", false
-}
-
-func parseTagKV(tag string) (string, string, bool) {
-	parts := strings.SplitN(tag, ":", 2)
-	if len(parts) != 2 {
-		return "", "", false
-	}
-	return strings.TrimSpace(parts[0]), strings.TrimSpace(parts[1]), true
 }
 
 func extractTraceAttribute(attribute string, fields map[string]string) (string, bool) {
