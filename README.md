@@ -67,8 +67,8 @@ Endpoints:
 
 Environment variable:
 
-- `MDAI_FIELD_MAPPING_PATH`: optional YAML path to override default mapping (`internal/validator/field-mapping.yaml`).
-- `MDAI_FIDELITY_POLICY_PATH`: optional policy path override.
+- `MDAI_FIDELITY_FIELD_MAPPING_PATH`: optional YAML path to field mapping config.
+- `MDAI_FIDELITY_RULES_PATH`: optional YAML path to fidelity rules config.
 - `MDAI_CONFIG_RELOAD_INTERVAL`: optional hot-reload interval for both files (default `15s`).
 
 Mapping format:
@@ -155,6 +155,6 @@ curl -sS localhost:8080/results/demo-1 | jq
 
 This validator is now shaped around raw Datadog payload capture on both sides of a receiver/exporter boundary, but it still compares normalized attribute/value presence after decoding rather than byte-for-byte equivalence. For reliable pairing across ingress and egress observations, inject a stable identifier such as `correlation_id` or `fidelity.correlation_id` before export.
 
-Policy-based fidelity is driven by the file set via `MDAI_FIDELITY_POLICY_PATH` (example: [internal/validator/fidelity-policy.yaml](/Users/justin/work/mdai-fidelity-validator/internal/validator/fidelity-policy.yaml)). `passed` in comparison results and `mdai_fidelity_required_*` Prometheus metrics are based on those required attributes. `full_payload_passed` remains available for strict flattened payload debugging.
+Policy-based fidelity is driven by the file set via `MDAI_FIDELITY_RULES_PATH` (example: [internal/validator/fidelity-policy.yaml](/Users/justin/work/mdai-fidelity-validator/internal/validator/fidelity-policy.yaml)). `passed` in comparison results and `mdai_fidelity_required_*` Prometheus metrics are based on those required attributes. `full_payload_passed` remains available for strict flattened payload debugging.
 
 For the demo collector config, the Datadog exporter still validates API key syntax even if you only point it at the local validator proxy. Use a 32-character hex placeholder like `00000000000000000000000000000000` or a real key via `DD_API_KEY`.

@@ -1,6 +1,7 @@
 package validator
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"slices"
@@ -11,7 +12,7 @@ import (
 )
 
 const (
-	policyPathEnvVar = "MDAI_FIDELITY_POLICY_PATH"
+	policyPathEnvVar = "MDAI_FIDELITY_RULES_PATH"
 )
 
 type Signal string
@@ -39,7 +40,7 @@ type RequiredAttributePolicy struct {
 }
 
 func (r *RequiredAttributePolicy) UnmarshalYAML(node *yaml.Node) error {
-	switch node.Kind {
+	switch node.Kind { //nolint:exhaustive
 	case yaml.ScalarNode:
 		var value string
 		if err := node.Decode(&value); err != nil {
@@ -62,7 +63,7 @@ func (r *RequiredAttributePolicy) UnmarshalYAML(node *yaml.Node) error {
 			name = strings.TrimSpace(raw.Attribute)
 		}
 		if name == "" {
-			return fmt.Errorf("required attribute entry missing name/attribute")
+			return errors.New("required attribute entry missing name/attribute")
 		}
 		r.Name = name
 		r.Compare = strings.TrimSpace(raw.Compare)
@@ -72,7 +73,7 @@ func (r *RequiredAttributePolicy) UnmarshalYAML(node *yaml.Node) error {
 	}
 }
 
-func (r RequiredAttributePolicy) compareMode() string {
+func (r *RequiredAttributePolicy) compareMode() string {
 	if strings.EqualFold(r.Compare, "presence_only") {
 		return "presence_only"
 	}
@@ -93,7 +94,8 @@ type RequiredAttributeCheck struct {
 func loadPolicy() (Policy, string, error) {
 	policy := defaultPolicy()
 
-	if configuredPath := os.Getenv(policyPathEnvVar); configuredPath != "" {
+	configuredPath := strings.TrimSpace(os.Getenv(policyPathEnvVar))
+	if configuredPath != "" {
 		body, err := os.ReadFile(configuredPath) //nolint:gosec
 		if err != nil {
 			return Policy{}, "", err
@@ -105,36 +107,12 @@ func loadPolicy() (Policy, string, error) {
 		return policy, fmt.Sprintf("file:%s (via %s)", configuredPath, policyPathEnvVar), nil
 	}
 
-	return policy, "builtin-defaults", nil
+	return policy, "runtime-empty-defaults", nil
 }
 
 func defaultPolicy() Policy {
 	return Policy{
-		Signals: map[Signal]SignalPolicy{
-			SignalMetrics: {
-				RequiredAttributes: []RequiredAttributePolicy{
-					{Name: "metric_name"},
-					{Name: "service"},
-					{Name: "env"},
-					{Name: "point_timestamp"},
-					{Name: "point_value"},
-				},
-			},
-			SignalTraces: {
-				RequiredAttributes: []RequiredAttributePolicy{
-					{Name: "trace_id"},
-					{Name: "span_id"},
-					{Name: "service"},
-					{Name: "operation"},
-				},
-			},
-			SignalLogs: {
-				RequiredAttributes: []RequiredAttributePolicy{
-					{Name: "message"},
-					{Name: "service"},
-				},
-			},
-		},
+		Signals: map[Signal]SignalPolicy{},
 	}
 }
 
@@ -171,7 +149,7 @@ func evaluateAttributeDeep(signal Signal, required RequiredAttributePolicy, rece
 	receiverValue, receiverOK := lookupRequiredAttribute(attribute, receiver)
 	if !receiverOK {
 		if signal != SignalLogs {
-			return evaluateAttributeDeepLegacy(signal, attribute, receiver, exporter, presenceOnly)
+			return evaluateAttributeDeepLegacy(signal, required, receiver, exporter)
 		}
 		check.Passed = false
 		check.PassedItems = 0
@@ -199,7 +177,10 @@ func evaluateAttributeDeep(signal Signal, required RequiredAttributePolicy, rece
 	return check
 }
 
-func evaluateAttributeDeepLegacy(signal Signal, attribute string, receiver, exporter map[string]string, presenceOnly bool) RequiredAttributeCheck {
+func evaluateAttributeDeepLegacy(signal Signal, required RequiredAttributePolicy, receiver, exporter map[string]string) RequiredAttributeCheck {
+	attribute := required.Name
+	presenceOnly := required.compareMode() == "presence_only"
+
 	check := RequiredAttributeCheck{
 		Attribute: attribute,
 		Passed:    true,
@@ -323,6 +304,7 @@ func lookupRequiredAttribute(attribute string, fields map[string]string) (string
 		if value, ok := fields["fidelity_correlation_id"]; ok {
 			return value, true
 		}
+	default:
 	}
 	return "", false
 }

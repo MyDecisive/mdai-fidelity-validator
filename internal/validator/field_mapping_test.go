@@ -1,8 +1,22 @@
 package validator
 
-import "testing"
+import (
+	"path/filepath"
+	"runtime"
+	"testing"
+)
+
+func setDefaultFieldMappingPath(t *testing.T) {
+	t.Helper()
+	_, thisFile, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("runtime.Caller(0) failed")
+	}
+	t.Setenv(fieldMappingPathEnvVar, filepath.Join(filepath.Dir(thisFile), "field-mapping.yaml"))
+}
 
 func TestFieldMappingMapLogs(t *testing.T) {
+	setDefaultFieldMappingPath(t)
 	mapping, _, err := loadFieldMapping()
 	if err != nil {
 		t.Fatalf("loadFieldMapping: %v", err)

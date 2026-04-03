@@ -207,7 +207,7 @@ func TestSelectedHeaders(t *testing.T) {
 	header := http.Header{}
 	header.Set("Content-Type", "application/msgpack")
 	header.Set("Dd-Api-Key", "secret")
-	header.Set("X-Fidelity-ID", "fid-1")
+	header.Set("X-Fidelity-Id", "fid-1")
 	header.Set("X-Request-ID", "req-1")
 	header.Set("X-Unused", "ignored")
 
@@ -235,7 +235,7 @@ func TestResolveCorrelationIDFromHeaderFallbacks(t *testing.T) {
 
 	t.Run("x-fidelity-id", func(t *testing.T) {
 		headers := http.Header{}
-		headers.Set("X-Fidelity-ID", "fid-123")
+		headers.Set("X-Fidelity-Id", "fid-123")
 		got := resolveCorrelationID(SignalLogs, fields, headers, body)
 		if got.CorrelationID != "logs:fid-123" || got.Strategy != "header" || got.Field != "X-Fidelity-ID" {
 			t.Fatalf("unexpected decision: %+v", got)
@@ -396,7 +396,7 @@ func TestResolvePairForRequest(t *testing.T) {
 		exporterPairByPort: map[string]string{},
 	}
 
-	req := httptest.NewRequest(http.MethodPost, "/v0.4/traces", nil)
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/v0.4/traces", http.NoBody)
 	gotDefault := svc.resolvePairForRequest(req, "receiver", ":8126")
 	if gotDefault.ID != defaultPairID {
 		t.Fatalf("expected default pair %q, got %q", defaultPairID, gotDefault.ID)
@@ -433,7 +433,7 @@ func TestHandleAdminPairs(t *testing.T) {
 	}
 
 	body := `{"id":"shadow-b","receiver_translator":"datadog_raw","exporter_translator":"datadog_raw","receiver_upstream":"http://receiver.example:8126","exporter_upstream":"http://exporter.example:8081","default":true}`
-	req := httptest.NewRequest(http.MethodPost, "/admin/pairs", strings.NewReader(body))
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/admin/pairs", strings.NewReader(body))
 	rec := httptest.NewRecorder()
 
 	svc.handleAdminPairs(rec, req)
@@ -456,7 +456,7 @@ func TestHandleAdminPairs(t *testing.T) {
 	}
 
 	body = `{"id":"shadow-c","receiver_translator":"datadog_raw","exporter_translator":"datadog_raw","receiver_ports":["18126"],"exporter_ports":["18081"]}`
-	req = httptest.NewRequest(http.MethodPost, "/admin/pairs", strings.NewReader(body))
+	req = httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/admin/pairs", strings.NewReader(body))
 	rec = httptest.NewRecorder()
 	svc.handleAdminPairs(rec, req)
 	if rec.Code != http.StatusAccepted {

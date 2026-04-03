@@ -7,6 +7,7 @@ import (
 )
 
 func TestCanonicalizeDatadogFieldsLogs(t *testing.T) {
+	setDefaultFieldMappingPath(t)
 	fields := map[string]string{
 		"[0].ddtags":  "env:dev,correlation_id:corr-1,fidelity.correlation_id:corr-1,otel_source:datadog_exporter",
 		"[0].message": `{"ddsource":"mdai-fidelity-validator","hostname":"localhost","message":"ddgen synthetic log event","service":"ddgen-svc","status":"info","timestamp":1773343955346}`,
@@ -73,6 +74,7 @@ func TestExtractTraceAttributesFromReceiverAndExporterShapes(t *testing.T) {
 }
 
 func TestEvaluatePolicyLogsSemanticMatch(t *testing.T) {
+	setDefaultFieldMappingPath(t)
 	receiver := map[string]string{
 		"message":                 "ddgen synthetic log event",
 		"service":                 "ddgen-svc",
@@ -117,6 +119,7 @@ func TestEvaluatePolicyLogsSemanticMatch(t *testing.T) {
 }
 
 func TestEvaluatePolicyLogsPresenceOnlyTimestamp(t *testing.T) {
+	setDefaultFieldMappingPath(t)
 	receiver := map[string]string{
 		"message":   "log entry",
 		"timestamp": "1773343955346",

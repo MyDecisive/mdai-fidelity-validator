@@ -1,7 +1,6 @@
 package validator
 
 import (
-	_ "embed"
 	"fmt"
 	"os"
 	"slices"
@@ -10,10 +9,9 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-const fieldMappingPathEnvVar = "MDAI_FIELD_MAPPING_PATH"
-
-//go:embed field-mapping.yaml
-var embeddedFieldMapping []byte
+const (
+	fieldMappingPathEnvVar = "MDAI_FIDELITY_FIELD_MAPPING_PATH"
+)
 
 type FieldMapping struct {
 	Signals   map[Signal]map[string][]string   `yaml:"signals"`
@@ -27,7 +25,8 @@ type FieldMappingExporters struct {
 func loadFieldMapping() (FieldMapping, string, error) {
 	mapping := defaultFieldMapping()
 
-	if configuredPath := strings.TrimSpace(os.Getenv(fieldMappingPathEnvVar)); configuredPath != "" {
+	configuredPath := strings.TrimSpace(os.Getenv(fieldMappingPathEnvVar))
+	if configuredPath != "" {
 		body, err := os.ReadFile(configuredPath) //nolint:gosec
 		if err != nil {
 			return FieldMapping{}, "", err
@@ -39,11 +38,8 @@ func loadFieldMapping() (FieldMapping, string, error) {
 		return mapping, fmt.Sprintf("file:%s (via %s)", configuredPath, fieldMappingPathEnvVar), nil
 	}
 
-	if err := yaml.Unmarshal(embeddedFieldMapping, &mapping); err != nil {
-		return FieldMapping{}, "", err
-	}
 	mapping = normalizeFieldMapping(mapping)
-	return mapping, "embedded:internal/validator/field-mapping.yaml", nil
+	return mapping, "runtime-empty-defaults", nil
 }
 
 func defaultFieldMapping() FieldMapping {
@@ -101,7 +97,7 @@ func (m FieldMapping) mapBySignal(signal Signal, signalMappings map[Signal]map[s
 	return best
 }
 
-func (m FieldMapping) mapSignal(signal Signal, signalMappings map[Signal]map[string][]string, fields map[string]string) map[string]string {
+func (FieldMapping) mapSignal(signal Signal, signalMappings map[Signal]map[string][]string, fields map[string]string) map[string]string {
 	if signalMappings == nil {
 		return map[string]string{}
 	}

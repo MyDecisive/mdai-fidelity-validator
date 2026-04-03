@@ -67,9 +67,9 @@ spec:
               value: {{ .Values.env.configReloadInterval | quote }}
             {{- end }}
             {{- if .Values.config.enabled }}
-            - name: MDAI_FIDELITY_POLICY_PATH
+            - name: MDAI_FIDELITY_RULES_PATH
               value: {{ printf "%s/fidelity-policy.yaml" .Values.config.mountPath | quote }}
-            - name: MDAI_FIELD_MAPPING_PATH
+            - name: MDAI_FIDELITY_FIELD_MAPPING_PATH
               value: {{ printf "%s/field-mapping.yaml" .Values.config.mountPath | quote }}
             {{- end }}
             {{- if .Values.env.receiverUpstream }}

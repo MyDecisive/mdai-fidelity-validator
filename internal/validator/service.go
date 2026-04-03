@@ -105,6 +105,7 @@ type PairConfig struct {
 
 type configuredPair struct {
 	PairConfig
+
 	receiverUpstream *url.URL
 	exporterUpstream *url.URL
 }
@@ -313,6 +314,45 @@ func NewService(retention time.Duration, receiverUpstream, exporterUpstream stri
 	return svc, nil
 }
 
+func configSignature(v any) (string, error) {
+	body, err := json.Marshal(v)
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256(body)
+	return hex.EncodeToString(sum[:]), nil
+}
+
+func (s *Service) AdminRoutes() http.Handler {
+	mux := http.NewServeMux()
+	mux.Handle("/metrics", promhttp.Handler())
+	mux.HandleFunc("/healthz", s.handleHealth)
+	mux.HandleFunc("/debug/pending", s.handleDebugPending)
+	mux.HandleFunc("/debug/last/", s.handleDebugLast)
+	mux.HandleFunc("/debug/last-signal/", s.handleDebugLastSignal)
+	mux.HandleFunc("/debug/results", s.handleDebugResults)
+	mux.HandleFunc("/debug/pairs", s.handleDebugPairs)
+	mux.HandleFunc("/admin/pairs", s.handleAdminPairs)
+	mux.HandleFunc("/intake/receiver/", s.handleSource("receiver"))
+	mux.HandleFunc("/intake/exporter/", s.handleSource("exporter"))
+	mux.HandleFunc("/results/", s.handleResults)
+
+	return mux
+}
+
+func (s *Service) IngestRoutes() http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", s.handleProxyIngest)
+	return mux
+}
+
+func (s *Service) ExporterAPIRoutes() http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/validate", s.handleDatadogValidate)
+	mux.HandleFunc("/", s.handleExporterAPI)
+	return mux
+}
+
 func (s *Service) currentPolicy() Policy {
 	s.policyMu.RLock()
 	defer s.policyMu.RUnlock()
@@ -344,7 +384,7 @@ func (s *Service) startConfigReloader() {
 	if raw := strings.TrimSpace(os.Getenv(configReloadEnvVar)); raw != "" {
 		parsed, err := time.ParseDuration(raw)
 		if err != nil {
-			log.Printf("invalid %s=%q; using default %s", configReloadEnvVar, raw, interval)
+			log.Printf("invalid %s=%q; using default %s", configReloadEnvVar, raw, interval) //nolint:gosec
 		} else if parsed > 0 {
 			interval = parsed
 		}
@@ -386,45 +426,6 @@ func (s *Service) startConfigReloader() {
 			reload()
 		}
 	}()
-}
-
-func configSignature(v any) (string, error) {
-	body, err := json.Marshal(v)
-	if err != nil {
-		return "", err
-	}
-	sum := sha256.Sum256(body)
-	return hex.EncodeToString(sum[:]), nil
-}
-
-func (s *Service) AdminRoutes() http.Handler {
-	mux := http.NewServeMux()
-	mux.Handle("/metrics", promhttp.Handler())
-	mux.HandleFunc("/healthz", s.handleHealth)
-	mux.HandleFunc("/debug/pending", s.handleDebugPending)
-	mux.HandleFunc("/debug/last/", s.handleDebugLast)
-	mux.HandleFunc("/debug/last-signal/", s.handleDebugLastSignal)
-	mux.HandleFunc("/debug/results", s.handleDebugResults)
-	mux.HandleFunc("/debug/pairs", s.handleDebugPairs)
-	mux.HandleFunc("/admin/pairs", s.handleAdminPairs)
-	mux.HandleFunc("/intake/receiver/", s.handleSource("receiver"))
-	mux.HandleFunc("/intake/exporter/", s.handleSource("exporter"))
-	mux.HandleFunc("/results/", s.handleResults)
-
-	return mux
-}
-
-func (s *Service) IngestRoutes() http.Handler {
-	mux := http.NewServeMux()
-	mux.HandleFunc("/", s.handleProxyIngest)
-	return mux
-}
-
-func (s *Service) ExporterAPIRoutes() http.Handler {
-	mux := http.NewServeMux()
-	mux.HandleFunc("/api/v1/validate", s.handleDatadogValidate)
-	mux.HandleFunc("/", s.handleExporterAPI)
-	return mux
 }
 
 func (*Service) handleHealth(w http.ResponseWriter, _ *http.Request) {
@@ -563,7 +564,7 @@ func (s *Service) handleDebugPairs(w http.ResponseWriter, _ *http.Request) {
 		})
 	}
 	slices.SortFunc(pairs, func(a, b map[string]any) int {
-		return strings.Compare(a["id"].(string), b["id"].(string))
+		return strings.Compare(fmt.Sprint(a["id"]), fmt.Sprint(b["id"]))
 	})
 	writeJSON(w, http.StatusOK, map[string]any{
 		"default_pair": s.defaultPair,
@@ -581,6 +582,7 @@ func (s *Service) handleAdminPairs(w http.ResponseWriter, r *http.Request) {
 
 	var req struct {
 		PairConfig
+
 		Default bool `json:"default"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -1029,7 +1031,7 @@ func (s *Service) captureRequest(pairID, translatorID, source string, signal Sig
 	return observed, result, matched, nil
 }
 
-func (s *Service) lookupTranslator(name string) (PayloadTranslator, error) {
+func (s *Service) lookupTranslator(name string) (PayloadTranslator, error) { //nolint:ireturn
 	if name == "" {
 		name = defaultTranslatorID
 	}
@@ -1052,7 +1054,7 @@ func (s *Service) resolvePairForRequest(r *http.Request, source, listener string
 		if pair, ok := s.pairs[requested]; ok {
 			return pair
 		}
-		log.Printf("unknown fidelity pair %q, using default pair=%s", requested, s.defaultPair)
+		log.Printf("unknown fidelity pair %q, using default pair=%s", requested, s.defaultPair) //nolint:gosec
 		return s.pairs[s.defaultPair]
 	}
 
@@ -1375,7 +1377,7 @@ func firstHeaderValue(headers http.Header, keys ...string) (string, string) {
 func logCorrelationDecision(source string, signal Signal, decision correlationResolution) {
 	switch decision.Strategy {
 	case "field", "header":
-		log.Printf(
+		log.Printf( //nolint:gosec
 			"correlation selection source=%s signal=%s strategy=%s key=%s raw_value=%q correlation_id=%s",
 			source,
 			signal,
@@ -1385,7 +1387,7 @@ func logCorrelationDecision(source string, signal Signal, decision correlationRe
 			decision.CorrelationID,
 		)
 	default:
-		log.Printf(
+		log.Printf( //nolint:gosec
 			"correlation selection source=%s signal=%s strategy=%s correlation_id=%s",
 			source,
 			signal,
@@ -1449,7 +1451,7 @@ func inferSignalFromDatadogPath(path string) Signal {
 	}
 }
 
-func parseExporterPath(rawPath string) (exporter string, normalizedPath string) {
+func parseExporterPath(rawPath string) (string, string) {
 	path := strings.TrimSpace(rawPath)
 	if path == "" {
 		return "", "/"
@@ -1463,6 +1465,7 @@ func parseExporterPath(rawPath string) (exporter string, normalizedPath string) 
 		return "", path
 	}
 
+	var exporter string
 	if segments[0] == "exporter" && len(segments) >= 2 {
 		exporter = strings.ToLower(strings.TrimSpace(segments[1]))
 		if len(segments) == 2 {
@@ -1489,7 +1492,7 @@ func inferDatadogAPISignal(path string) Signal {
 	}
 }
 
-func decodeBody(body []byte, path, contentEncoding, contentType string) (any, string, error) {
+func decodeBody(body []byte, _, contentEncoding, contentType string) (any, string, error) {
 	var decoded []byte
 	format := "json"
 
@@ -1500,7 +1503,7 @@ func decodeBody(body []byte, path, contentEncoding, contentType string) (any, st
 	}
 
 	if strings.Contains(strings.ToLower(contentType), "protobuf") {
-		return nil, "", fmt.Errorf("protobuf payloads are not supported in config-mapping mode")
+		return nil, "", errors.New("protobuf payloads are not supported in config-mapping mode")
 	}
 
 	if looksLikeJSON(decoded) || strings.Contains(strings.ToLower(contentType), "json") {
