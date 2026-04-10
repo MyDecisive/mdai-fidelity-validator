@@ -35,44 +35,6 @@ func TestCanonicalizeDatadogFieldsLogs(t *testing.T) {
 	}
 }
 
-func TestExtractTraceAttributesFromReceiverAndExporterShapes(t *testing.T) {
-	receiver := map[string]string{
-		"[0][0].trace_id":                     "trace-1",
-		"[0][0].service":                      "svc-a",
-		"[0][0].meta.correlation_id":          "corr-1",
-		"[0][0].meta.fidelity.correlation_id": "corr-1",
-		"[0][1].trace_id":                     "trace-1",
-	}
-	exporter := map[string]string{
-		"tracerPayloads[0].chunks[0].spans[0].trace_id":                     "trace-1",
-		"tracerPayloads[0].chunks[0].spans[0].service":                      "svc-a",
-		"tracerPayloads[0].chunks[0].spans[0].meta.correlation_id":          "corr-1",
-		"tracerPayloads[0].chunks[0].spans[0].meta.fidelity.correlation_id": "corr-1",
-		"tracerPayloads[0].chunks[0].spans[1].trace_id":                     "trace-1",
-	}
-
-	for _, tc := range []struct {
-		name   string
-		fields map[string]string
-	}{
-		{name: "receiver", fields: receiver},
-		{name: "exporter", fields: exporter},
-	} {
-		traceID, ok := extractTraceAttribute("trace_id", tc.fields)
-		if !ok || traceID != "trace-1" {
-			t.Fatalf("%s trace_id=%q ok=%v", tc.name, traceID, ok)
-		}
-		service, ok := extractTraceAttribute("service", tc.fields)
-		if !ok || service != "svc-a" {
-			t.Fatalf("%s service=%q ok=%v", tc.name, service, ok)
-		}
-		spanCount, ok := extractTraceAttribute("span_count", tc.fields)
-		if !ok || spanCount != "2" {
-			t.Fatalf("%s span_count=%q ok=%v", tc.name, spanCount, ok)
-		}
-	}
-}
-
 func TestEvaluatePolicyLogsSemanticMatch(t *testing.T) {
 	setDefaultFieldMappingPath(t)
 	receiver := map[string]string{

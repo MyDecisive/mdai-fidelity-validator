@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"compress/gzip"
 	"crypto/rand"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"math/rand/v2"
 	"strings"
 	"time"
 
@@ -197,9 +199,9 @@ func buildTracePayload(service, env, host, correlationID string) any {
 	now := time.Now()
 	start := now.Add(-250 * time.Millisecond).UnixNano()
 	duration := int64(250 * time.Millisecond)
-	traceID := randomUint63()
-	parentSpanID := randomUint63()
-	childSpanID := randomUint63()
+	traceID := rand.Uint64() & 0x7fffffffffffffff
+	parentSpanID := rand.Uint64() & 0x7fffffffffffffff
+	childSpanID := rand.Uint64() & 0x7fffffffffffffff
 
 	payload := [][]map[string]any{
 		{
@@ -325,19 +327,7 @@ func randomHex(n int) string {
 }
 
 func randomUint63() int64 {
-	buf := make([]byte, 8)
-	if _, err := rand.Read(buf); err != nil {
-		panic(err)
-	}
-	buf[0] &= 0x7f
-	var out int64
-	for _, b := range buf {
-		out = (out << 8) | int64(b)
-	}
-	if out == 0 {
-		return 1
-	}
-	return out
+	return int64(rand.Uint64() & 0x7fffffffffffffff)
 }
 
 func mutatePayloadForDrop(signal Signal, payload any, probability float64) {
@@ -410,7 +400,7 @@ func dropMapKeys(values map[string]any, probability float64, protected map[strin
 		if _, ok := protected[key]; ok {
 			continue
 		}
-		if randFloat64() < probability {
+		if rand.Float64() < probability {
 			delete(values, key)
 		}
 	}
@@ -423,7 +413,7 @@ func dropTags(tags []string, probability float64) []string {
 			out = append(out, tag)
 			continue
 		}
-		if randFloat64() < probability {
+		if rand.Float64() < probability {
 			continue
 		}
 		out = append(out, tag)
@@ -436,16 +426,4 @@ func protectedCorrelationKeys() map[string]struct{} {
 		"correlation_id":          {},
 		"fidelity.correlation_id": {},
 	}
-}
-
-func randFloat64() float64 {
-	buf := make([]byte, 8)
-	if _, err := rand.Read(buf); err != nil {
-		panic(err)
-	}
-	var n uint64
-	for _, b := range buf {
-		n = (n << 8) | uint64(b)
-	}
-	return float64(n>>11) / (1 << 53)
 }

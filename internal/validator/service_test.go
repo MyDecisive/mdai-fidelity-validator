@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/vmihailenco/msgpack/v5"
+	"go.uber.org/zap"
 )
 
 func TestComparePairPassesWhenFieldsMatch(t *testing.T) {
@@ -374,6 +375,7 @@ func TestComparePairStripsCorrelationFromLogMessageJSON(t *testing.T) {
 
 func TestResolvePairForRequest(t *testing.T) {
 	svc := &Service{
+		logger:      zap.NewNop(),
 		defaultPair: defaultPairID,
 		pairs: map[string]configuredPair{
 			defaultPairID: {
@@ -417,6 +419,7 @@ func TestResolvePairForRequest(t *testing.T) {
 
 func TestHandleAdminPairs(t *testing.T) {
 	svc := &Service{
+		logger:      zap.NewNop(),
 		defaultPair: defaultPairID,
 		translators: map[string]PayloadTranslator{
 			defaultTranslatorID: datadogRawTranslator{mapping: newMappingStore(defaultFieldMapping())},
@@ -469,3 +472,4 @@ func TestHandleAdminPairs(t *testing.T) {
 		t.Fatalf("expected exporter port mapping to shadow-c, got %q", got)
 	}
 }
+

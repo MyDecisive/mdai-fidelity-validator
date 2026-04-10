@@ -12,7 +12,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"net"
 	"net/http"
 	"net/url"
@@ -24,10 +23,12 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/cespare/xxhash/v2"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/vmihailenco/msgpack/v5"
+	"go.uber.org/zap"
 )
 
 const numShards = 32
@@ -111,6 +112,7 @@ type configuredPair struct {
 }
 
 type Service struct {
+	logger     *zap.Logger
 	shards     []*shard
 	retention  time.Duration
 	httpClient *http.Client
@@ -232,7 +234,7 @@ type DebugPayload struct {
 	RawBody       string            `json:"raw_body,omitempty"`
 }
 
-func NewService(retention time.Duration, receiverUpstream, exporterUpstream string) (*Service, error) {
+func NewService(logger *zap.Logger, retention time.Duration, receiverUpstream, exporterUpstream string) (*Service, error) {
 	receiverURL, err := parseOptionalURL(receiverUpstream)
 	if err != nil {
 		return nil, fmt.Errorf("invalid receiver upstream: %w", err)
@@ -245,14 +247,15 @@ func NewService(retention time.Duration, receiverUpstream, exporterUpstream stri
 	if err != nil {
 		return nil, fmt.Errorf("load policy: %w", err)
 	}
-	log.Printf("loaded fidelity policy source=%s summary=%s", policySource, summarizePolicy(policy))
+	logger.Info("loaded fidelity policy", zap.String("source", policySource), zap.String("summary", summarizePolicy(policy)))
 	fieldMap, mappingSource, err := loadFieldMapping()
 	if err != nil {
 		return nil, fmt.Errorf("load field mapping: %w", err)
 	}
-	log.Printf("loaded field mapping source=%s", mappingSource)
+	logger.Info("loaded field mapping", zap.String("source", mappingSource))
 
 	svc := &Service{
+		logger:           logger,
 		shards:           make([]*shard, numShards),
 		retention:        retention,
 		lastBySource:     make(map[string]*observedPayload),
@@ -313,6 +316,7 @@ func NewService(retention time.Duration, receiverUpstream, exporterUpstream stri
 	svc.startConfigReloader()
 	return svc, nil
 }
+
 
 func configSignature(v any) (string, error) {
 	body, err := json.Marshal(v)
@@ -384,7 +388,7 @@ func (s *Service) startConfigReloader() {
 	if raw := strings.TrimSpace(os.Getenv(configReloadEnvVar)); raw != "" {
 		parsed, err := time.ParseDuration(raw)
 		if err != nil {
-			log.Printf("invalid %s=%q; using default %s", configReloadEnvVar, raw, interval) //nolint:gosec
+			s.logger.Warn("invalid config reload interval", zap.String("var", configReloadEnvVar), zap.String("value", raw), zap.Duration("default", interval))
 		} else if parsed > 0 {
 			interval = parsed
 		}
@@ -397,23 +401,23 @@ func (s *Service) startConfigReloader() {
 	reload := func() {
 		policy, source, err := loadPolicy()
 		if err != nil {
-			log.Printf("policy reload failed; keeping last-known-good err=%v", err)
+			s.logger.Warn("policy reload failed; keeping last-known-good", zap.Error(err))
 		} else if sig, sigErr := configSignature(policy); sigErr == nil {
 			if sig != lastPolicySig {
 				s.setPolicy(policy)
 				lastPolicySig = sig
-				log.Printf("reloaded fidelity policy source=%s summary=%s", source, summarizePolicy(policy))
+				s.logger.Info("reloaded fidelity policy", zap.String("source", source), zap.String("summary", summarizePolicy(policy)))
 			}
 		}
 
 		mapping, source, err := loadFieldMapping()
 		if err != nil {
-			log.Printf("field mapping reload failed; keeping last-known-good err=%v", err)
+			s.logger.Warn("field mapping reload failed; keeping last-known-good", zap.Error(err))
 		} else if sig, sigErr := configSignature(mapping); sigErr == nil {
 			if sig != lastMappingSig {
 				s.setMapping(mapping)
 				lastMappingSig = sig
-				log.Printf("reloaded field mapping source=%s", source)
+				s.logger.Info("reloaded field mapping", zap.String("source", source))
 			}
 		}
 	}
@@ -449,7 +453,7 @@ func (s *Service) handleResults(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusOK, result)
+	writeJSON(s, w, http.StatusOK, result)
 }
 
 func (s *Service) handleDebugPending(w http.ResponseWriter, _ *http.Request) {
@@ -477,7 +481,7 @@ func (s *Service) handleDebugPending(w http.ResponseWriter, _ *http.Request) {
 		}
 	})
 
-	writeJSON(w, http.StatusOK, map[string]any{
+	writeJSON(s, w, http.StatusOK, map[string]any{
 		"count":   len(pending),
 		"pending": pending,
 	})
@@ -498,7 +502,7 @@ func (s *Service) handleDebugLast(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusOK, debugPayloadFromObserved(payload))
+	writeJSON(s, w, http.StatusOK, debugPayloadFromObserved(payload))
 }
 
 func (s *Service) handleDebugLastSignal(w http.ResponseWriter, r *http.Request) {
@@ -516,7 +520,7 @@ func (s *Service) handleDebugLastSignal(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	writeJSON(w, http.StatusOK, debugPayloadFromObserved(payload))
+	writeJSON(s, w, http.StatusOK, debugPayloadFromObserved(payload))
 }
 
 func (s *Service) handleDebugResults(w http.ResponseWriter, _ *http.Request) {
@@ -540,7 +544,7 @@ func (s *Service) handleDebugResults(w http.ResponseWriter, _ *http.Request) {
 		}
 	})
 
-	writeJSON(w, http.StatusOK, map[string]any{
+	writeJSON(s, w, http.StatusOK, map[string]any{
 		"count":   len(results),
 		"results": results,
 	})
@@ -566,7 +570,7 @@ func (s *Service) handleDebugPairs(w http.ResponseWriter, _ *http.Request) {
 	slices.SortFunc(pairs, func(a, b map[string]any) int {
 		return strings.Compare(fmt.Sprint(a["id"]), fmt.Sprint(b["id"]))
 	})
-	writeJSON(w, http.StatusOK, map[string]any{
+	writeJSON(s, w, http.StatusOK, map[string]any{
 		"default_pair": s.defaultPair,
 		"pairs":        pairs,
 	})
@@ -604,7 +608,7 @@ func (s *Service) handleAdminPairs(w http.ResponseWriter, r *http.Request) {
 	s.rebuildPortMappingsLocked()
 	s.pairMu.Unlock()
 
-	writeJSON(w, http.StatusAccepted, map[string]any{
+	writeJSON(s, w, http.StatusAccepted, map[string]any{
 		"saved":   true,
 		"pair":    pair.ID,
 		"default": req.Default,
@@ -613,40 +617,63 @@ func (s *Service) handleAdminPairs(w http.ResponseWriter, r *http.Request) {
 
 func (s *Service) handleDatadogValidate(w http.ResponseWriter, r *http.Request) {
 	s.captureDatadogAPIRequest(":8443", r)
-	writeJSON(w, http.StatusOK, map[string]any{
+	writeJSON(s, w, http.StatusOK, map[string]any{
 		"valid": true,
 	})
 }
+
 
 func (s *Service) handleExporterAPI(w http.ResponseWriter, r *http.Request) {
 	path := readRequestPath(r)
 	_, normalizedPath := parseExporterPath(path)
 	signal := inferSignalFromDatadogPath(normalizedPath)
 
-	pair := s.resolvePairForRequest(r, "exporter", ":18081")
-	observed, _, _, err := s.captureRequest(pair.ID, pair.ExporterTranslator, "exporter", signal, ":18081", path, r)
+	s.handleCommonIngest(w, r, "exporter", signal, ":18081", path, normalizedPath)
+}
+
+func (s *Service) handleProxyIngest(w http.ResponseWriter, r *http.Request) {
+	path := readRequestPath(r)
+	signal := inferSignalFromDatadogPath(path)
+
+	s.handleCommonIngest(w, r, "receiver", signal, ":8126", path, path)
+}
+
+func (s *Service) handleCommonIngest(w http.ResponseWriter, r *http.Request, source string, signal Signal, listener, rawPath, forwardPath string) {
+	pair := s.resolvePairForRequest(r, source, listener)
+	translator := pair.ReceiverTranslator
+	upstream := pair.receiverUpstream
+	if source == "exporter" {
+		translator = pair.ExporterTranslator
+		upstream = pair.exporterUpstream
+	}
+
+	observed, _, _, err := s.captureRequest(pair.ID, translator, source, signal, listener, rawPath, r)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 
-	upstream := pair.exporterUpstream
 	if upstream == nil {
-		upstream = s.exporterUpstream
+		if source == "exporter" {
+			upstream = s.exporterUpstream
+		} else {
+			upstream = s.receiverUpstream
+		}
 	}
+
 	if upstream == nil {
 		writeDatadogAck(w, signal)
 		return
 	}
 
-	resp, err := s.forwardRaw(r.Context(), upstream, normalizedPath, r.URL.RawQuery, r.Method, r.Header, observed.body)
+	resp, err := s.forwardRaw(r.Context(), upstream, forwardPath, r.URL.RawQuery, r.Method, r.Header, observed.body)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("forwarding failed: %v", err), http.StatusBadGateway)
 		return
 	}
 	defer resp.Body.Close() //nolint:errcheck
 
-	copyResponse(w, resp)
+	copyResponse(s, w, resp)
 }
 
 func (s *Service) handleSource(source string) http.HandlerFunc {
@@ -684,42 +711,12 @@ func (s *Service) handleSource(source string) http.HandlerFunc {
 			response["comparison"] = result
 		}
 
-		writeJSON(w, http.StatusAccepted, response)
+		writeJSON(s, w, http.StatusAccepted, response)
 	}
-}
-
-func (s *Service) handleProxyIngest(w http.ResponseWriter, r *http.Request) {
-	pair := s.resolvePairForRequest(r, "receiver", ":8126")
-	path := readRequestPath(r)
-	signal := inferSignalFromDatadogPath(path)
-	observed, _, _, err := s.captureRequest(pair.ID, pair.ReceiverTranslator, "receiver", signal, ":8126", path, r)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-
-	upstream := pair.receiverUpstream
-	if upstream == nil {
-		upstream = s.receiverUpstream
-	}
-	if upstream == nil {
-		writeDatadogAck(w, signal)
-		return
-	}
-
-	resp, err := s.forwardRaw(r.Context(), upstream, path, r.URL.RawQuery, r.Method, r.Header, observed.body)
-	if err != nil {
-		http.Error(w, fmt.Sprintf("forwarding failed: %v", err), http.StatusBadGateway)
-		return
-	}
-	defer resp.Body.Close() //nolint:errcheck
-
-	copyResponse(w, resp)
 }
 
 func (s *Service) getShard(correlationID string) *shard {
-	hash := sha256.Sum256([]byte(correlationID))
-	index := int(hash[0]) % numShards
+	index := int(xxhash.Sum64String(correlationID) % numShards)
 	return s.shards[index]
 }
 
@@ -775,7 +772,9 @@ func (s *Service) gcShardLocked(sh *shard, now time.Time) {
 func (s *Service) updatePendingGauge() {
 	var total int
 	for _, sh := range s.shards {
+		sh.mu.Lock()
 		total += len(sh.pending)
+		sh.mu.Unlock()
 	}
 	s.pendingGauge.Set(float64(total))
 }
@@ -1018,15 +1017,15 @@ func (s *Service) captureRequest(pairID, translatorID, source string, signal Sig
 	}
 
 	s.receivedTotal.WithLabelValues(source, string(effectiveSignal)).Inc()
-	logCorrelationDecision(source, signal, correlationDecision)
-	logObservedPayload(observed)
+	logCorrelationDecision(s, source, signal, correlationDecision)
+	logObservedPayload(s, observed)
 	if decodeError != "" {
 		s.rememberObserved(observed)
 		return observed, nil, false, nil
 	}
 	result, matched := s.observe(observed)
 	if matched && result != nil && source == "exporter" {
-		logComparisonSummary(*result)
+		logComparisonSummary(s, *result)
 	}
 	return observed, result, matched, nil
 }
@@ -1054,7 +1053,7 @@ func (s *Service) resolvePairForRequest(r *http.Request, source, listener string
 		if pair, ok := s.pairs[requested]; ok {
 			return pair
 		}
-		log.Printf("unknown fidelity pair %q, using default pair=%s", requested, s.defaultPair) //nolint:gosec
+		s.logger.Warn("unknown fidelity pair", zap.String("requested", requested), zap.String("default", s.defaultPair))
 		return s.pairs[s.defaultPair]
 	}
 
@@ -1075,10 +1074,10 @@ func (s *Service) resolvePairForRequest(r *http.Request, source, listener string
 	}
 	if pairID != "" {
 		if pair, ok := s.pairs[pairID]; ok {
-			log.Printf("resolved fidelity pair from port source=%s port=%s pair=%s", source, matchedPort, pairID)
+			s.logger.Info("resolved fidelity pair from port", zap.String("source", source), zap.String("port", matchedPort), zap.String("pair", pairID))
 			return pair
 		}
-		log.Printf("port mapping matched unknown pair id=%s, using default pair=%s", pairID, s.defaultPair)
+		s.logger.Warn("port mapping matched unknown pair", zap.String("pair_id", pairID), zap.String("default", s.defaultPair))
 	}
 	return s.pairs[s.defaultPair]
 }
@@ -1229,7 +1228,7 @@ func firstNonEmpty(values ...string) string {
 }
 
 func (s *Service) captureDatadogAPIRequest(listener string, r *http.Request) {
-	body := mustReadBodyBytes(r)
+	body := mustReadBodyBytes(s, r)
 	path := readRequestPath(r)
 	signal := inferDatadogAPISignal(path)
 	format := "raw"
@@ -1264,7 +1263,7 @@ func (s *Service) captureDatadogAPIRequest(listener string, r *http.Request) {
 		flattened: fields,
 	}
 
-	logObservedPayload(observed)
+	logObservedPayload(s, observed)
 	s.rememberObserved(observed)
 }
 
@@ -1277,17 +1276,12 @@ func flattenValueMap(payload any) map[string]string {
 func flattenValue(result map[string]string, prefix string, value any) {
 	switch typed := value.(type) {
 	case map[string]any:
-		keys := make([]string, 0, len(typed))
-		for key := range typed {
-			keys = append(keys, key)
-		}
-		slices.Sort(keys)
-		for _, key := range keys {
+		for key, val := range typed {
 			next := key
 			if prefix != "" {
 				next = prefix + "." + key
 			}
-			flattenValue(result, next, typed[key])
+			flattenValue(result, next, val)
 		}
 	case []any:
 		for index, item := range typed {
@@ -1374,25 +1368,23 @@ func firstHeaderValue(headers http.Header, keys ...string) (string, string) {
 	return "", ""
 }
 
-func logCorrelationDecision(source string, signal Signal, decision correlationResolution) {
+func logCorrelationDecision(s *Service, source string, signal Signal, decision correlationResolution) {
 	switch decision.Strategy {
 	case "field", "header":
-		log.Printf( //nolint:gosec
-			"correlation selection source=%s signal=%s strategy=%s key=%s raw_value=%q correlation_id=%s",
-			source,
-			signal,
-			decision.Strategy,
-			decision.Field,
-			decision.RawValue,
-			decision.CorrelationID,
+		s.logger.Info("correlation selection",
+			zap.String("source", source),
+			zap.String("signal", string(signal)),
+			zap.String("strategy", decision.Strategy),
+			zap.String("key", decision.Field),
+			zap.String("raw_value", decision.RawValue),
+			zap.String("correlation_id", decision.CorrelationID),
 		)
 	default:
-		log.Printf( //nolint:gosec
-			"correlation selection source=%s signal=%s strategy=%s correlation_id=%s",
-			source,
-			signal,
-			decision.Strategy,
-			decision.CorrelationID,
+		s.logger.Info("correlation selection",
+			zap.String("source", source),
+			zap.String("signal", string(signal)),
+			zap.String("strategy", decision.Strategy),
+			zap.String("correlation_id", decision.CorrelationID),
 		)
 	}
 }
@@ -1420,8 +1412,15 @@ func deriveFingerprintCorrelationID(signal Signal, fields map[string]string) str
 
 	if !foundIdentity {
 		stableTags := []string{"service", "env", "version", "meta.service", "meta.env"}
+		keys := make([]string, 0, len(fields))
+		for k := range fields {
+			keys = append(keys, k)
+		}
+		slices.Sort(keys)
+
 		for _, tag := range stableTags {
-			for fieldKey, val := range fields {
+			for _, fieldKey := range keys {
+				val := fields[fieldKey]
 				if strings.Contains(fieldKey, "tags") && strings.Contains(val, tag+":") {
 					builder.WriteString("|" + fieldKey + "=" + val)
 				}
@@ -1722,13 +1721,13 @@ func readRequestPath(r *http.Request) string {
 	return r.URL.Path
 }
 
-func mustReadBodyBytes(r *http.Request) []byte {
+func mustReadBodyBytes(s *Service, r *http.Request) []byte {
 	if r.Body == nil {
 		return nil
 	}
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
-		log.Printf("failed to read request body: %v", err)
+		s.logger.Error("failed to read request body", zap.Error(err))
 		return nil
 	}
 	r.Body = io.NopCloser(bytes.NewReader(body))
@@ -1770,7 +1769,7 @@ func cloneHeaders(header http.Header) http.Header {
 	return cloned
 }
 
-func copyResponse(w http.ResponseWriter, resp *http.Response) {
+func copyResponse(s *Service, w http.ResponseWriter, resp *http.Response) {
 	for key, values := range resp.Header {
 		for _, value := range values {
 			w.Header().Add(key, value)
@@ -1778,7 +1777,7 @@ func copyResponse(w http.ResponseWriter, resp *http.Response) {
 	}
 	w.WriteHeader(resp.StatusCode)
 	if _, err := io.Copy(w, resp.Body); err != nil {
-		log.Printf("failed to copy upstream response body: %v", err)
+		s.logger.Warn("failed to copy upstream response body", zap.Error(err))
 	}
 }
 
@@ -1818,17 +1817,22 @@ func debugPayloadFromObserved(payload *observedPayload) DebugPayload {
 	}
 }
 
-func logObservedPayload(payload *observedPayload) {
+func logObservedPayload(s *Service, payload *observedPayload) {
 	debug := debugPayloadFromObserved(payload)
 	body, err := json.Marshal(debug)
 	if err != nil {
-		log.Printf("captured payload source=%s signal=%s correlation_id=%s marshal_error=%v", payload.source, payload.signal, payload.correlation, err)
+		s.logger.Error("captured payload marshal error",
+			zap.String("source", payload.source),
+			zap.String("signal", string(payload.signal)),
+			zap.String("correlation_id", payload.correlation),
+			zap.Error(err),
+		)
 		return
 	}
-	log.Printf("captured payload %s", string(body))
+	s.logger.Info("captured payload", zap.String("json", string(body)))
 }
 
-func logComparisonSummary(result ComparisonResult) {
+func logComparisonSummary(s *Service, result ComparisonResult) {
 	requiredPassed := 0
 	for _, check := range result.RequiredChecks {
 		if check.Passed {
@@ -1836,17 +1840,16 @@ func logComparisonSummary(result ComparisonResult) {
 		}
 	}
 
-	log.Printf(
-		"comparison result signal=%s correlation_id=%s policy_pass=%t full_payload_pass=%t matched=%d mismatched=%d missing=%d required_passed=%d required_total=%d",
-		result.Signal,
-		result.CorrelationID,
-		result.Passed,
-		result.FullPayloadPassed,
-		len(result.Matched),
-		len(result.Mismatched),
-		len(result.MissingIn),
-		requiredPassed,
-		len(result.RequiredChecks),
+	s.logger.Info("comparison result",
+		zap.String("signal", string(result.Signal)),
+		zap.String("correlation_id", result.CorrelationID),
+		zap.Bool("policy_pass", result.Passed),
+		zap.Bool("full_payload_pass", result.FullPayloadPassed),
+		zap.Int("matched", len(result.Matched)),
+		zap.Int("mismatched", len(result.Mismatched)),
+		zap.Int("missing", len(result.MissingIn)),
+		zap.Int("required_passed", requiredPassed),
+		zap.Int("required_total", len(result.RequiredChecks)),
 	)
 }
 
@@ -1856,13 +1859,14 @@ func (noopResponseWriter) Header() http.Header       { return make(http.Header) 
 func (noopResponseWriter) Write([]byte) (int, error) { return 0, nil }
 func (noopResponseWriter) WriteHeader(int)           {}
 
-func writeJSON(w http.ResponseWriter, status int, payload any) {
+func writeJSON(s *Service, w http.ResponseWriter, status int, payload any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	if err := json.NewEncoder(w).Encode(payload); err != nil {
-		log.Printf("failed to write response: %v", err)
+		s.logger.Error("failed to write response", zap.Error(err))
 	}
 }
+
 
 func summarizePolicy(policy Policy) string {
 	signals := make([]string, 0, len(policy.Signals))

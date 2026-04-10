@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"slices"
-	"strconv"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -305,37 +304,6 @@ func lookupRequiredAttribute(attribute string, fields map[string]string) (string
 			return value, true
 		}
 	default:
-	}
-	return "", false
-}
-
-func extractTraceAttribute(attribute string, fields map[string]string) (string, bool) {
-	keys := make([]string, 0, len(fields))
-	for k := range fields {
-		keys = append(keys, k)
-	}
-	slices.Sort(keys)
-
-	if attribute == "span_count" {
-		prefixes := make(map[string]struct{})
-		for _, k := range keys {
-			if strings.HasSuffix(k, ".trace_id") || strings.HasSuffix(k, ".traceID") {
-				idx := strings.LastIndex(k, ".")
-				if idx != -1 {
-					prefixes[k[:idx]] = struct{}{}
-				}
-			}
-		}
-		if len(prefixes) > 0 {
-			return strconv.Itoa(len(prefixes)), true
-		}
-		return "", false
-	}
-
-	for _, k := range keys {
-		if k == attribute || strings.HasSuffix(k, "."+attribute) {
-			return fields[k], true
-		}
 	}
 	return "", false
 }

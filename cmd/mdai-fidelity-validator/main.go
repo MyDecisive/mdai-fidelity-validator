@@ -39,7 +39,7 @@ func run(logger *zap.Logger) error {
 	receiverUpstream := os.Getenv("MDAI_RECEIVER_UPSTREAM")
 	exporterUpstream := os.Getenv("MDAI_EXPORTER_UPSTREAM")
 
-	svc, err := validator.NewService(retention, receiverUpstream, exporterUpstream)
+	svc, err := validator.NewService(logger, retention, receiverUpstream, exporterUpstream)
 	if err != nil {
 		return err
 	}
