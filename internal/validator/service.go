@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path"
 	"slices"
 	"strconv"
 	"strings"
@@ -95,13 +96,15 @@ func (t datadogRawTranslator) Decode(signal Signal, path, contentEncoding, conte
 }
 
 type PairConfig struct {
-	ID                 string   `json:"id"`
-	ReceiverTranslator string   `json:"receiver_translator"`
-	ExporterTranslator string   `json:"exporter_translator"`
-	ReceiverUpstream   string   `json:"receiver_upstream,omitempty"`
-	ExporterUpstream   string   `json:"exporter_upstream,omitempty"`
-	ReceiverPorts      []string `json:"receiver_ports,omitempty"`
-	ExporterPorts      []string `json:"exporter_ports,omitempty"`
+	ID                  string   `json:"id"`
+	ReceiverTranslator  string   `json:"receiver_translator"`
+	ExporterTranslator  string   `json:"exporter_translator"`
+	ReceiverUpstream    string   `json:"receiver_upstream,omitempty"`
+	ExporterUpstream    string   `json:"exporter_upstream,omitempty"`
+	ReceiverPorts       []string `json:"receiver_ports,omitempty"`
+	ExporterPorts       []string `json:"exporter_ports,omitempty"`
+	ReceiverIgnorePaths []string `json:"receiver_ignore_paths,omitempty"`
+	ExporterIgnorePaths []string `json:"exporter_ignore_paths,omitempty"`
 }
 
 type configuredPair struct {
@@ -627,6 +630,29 @@ func (s *Service) handleExporterAPI(w http.ResponseWriter, r *http.Request) {
 	path := readRequestPath(r)
 	_, normalizedPath := parseExporterPath(path)
 	signal := inferSignalFromDatadogPath(normalizedPath)
+	pair := s.resolvePairForRequest(r, "exporter", ":18081")
+	if pair.shouldIgnorePath("exporter", path) {
+		s.logger.Info("ignoring exporter payload", zap.String("pair", pair.ID), zap.String("path", normalizedPath))
+		body := mustReadBodyBytes(s, r)
+		upstream := pair.exporterUpstream
+		if upstream == nil {
+			upstream = s.exporterUpstream
+		}
+		if upstream == nil {
+			writeDatadogAck(w, signal)
+			return
+		}
+
+		resp, err := s.forwardRaw(r.Context(), upstream, normalizedPath, r.URL.RawQuery, r.Method, r.Header, body)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("forwarding failed: %v", err), http.StatusBadGateway)
+			return
+		}
+		defer resp.Body.Close() //nolint:errcheck
+
+		copyResponse(s, w, resp)
+		return
+	}
 
 	s.handleCommonIngest(w, r, "exporter", signal, ":18081", path, normalizedPath)
 }
@@ -634,6 +660,29 @@ func (s *Service) handleExporterAPI(w http.ResponseWriter, r *http.Request) {
 func (s *Service) handleProxyIngest(w http.ResponseWriter, r *http.Request) {
 	path := readRequestPath(r)
 	signal := inferSignalFromDatadogPath(path)
+	pair := s.resolvePairForRequest(r, "receiver", ":8126")
+	if pair.shouldIgnorePath("receiver", path) {
+		s.logger.Info("ignoring receiver payload", zap.String("pair", pair.ID), zap.String("path", path))
+		body := mustReadBodyBytes(s, r)
+		upstream := pair.receiverUpstream
+		if upstream == nil {
+			upstream = s.receiverUpstream
+		}
+		if upstream == nil {
+			writeDatadogAck(w, signal)
+			return
+		}
+
+		resp, err := s.forwardRaw(r.Context(), upstream, path, r.URL.RawQuery, r.Method, r.Header, body)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("forwarding failed: %v", err), http.StatusBadGateway)
+			return
+		}
+		defer resp.Body.Close() //nolint:errcheck
+
+		copyResponse(s, w, resp)
+		return
+	}
 
 	s.handleCommonIngest(w, r, "receiver", signal, ":8126", path, path)
 }
@@ -1117,16 +1166,26 @@ func (s *Service) newConfiguredPair(cfg PairConfig) (configuredPair, error) {
 	if err != nil {
 		return configuredPair{}, fmt.Errorf("invalid exporter ports: %w", err)
 	}
+	receiverIgnorePaths, err := normalizePathPatternList(cfg.ReceiverIgnorePaths)
+	if err != nil {
+		return configuredPair{}, fmt.Errorf("invalid receiver ignore paths: %w", err)
+	}
+	exporterIgnorePaths, err := normalizePathPatternList(cfg.ExporterIgnorePaths)
+	if err != nil {
+		return configuredPair{}, fmt.Errorf("invalid exporter ignore paths: %w", err)
+	}
 
 	return configuredPair{
 		PairConfig: PairConfig{
-			ID:                 id,
-			ReceiverTranslator: receiverTranslator,
-			ExporterTranslator: exporterTranslator,
-			ReceiverUpstream:   strings.TrimSpace(cfg.ReceiverUpstream),
-			ExporterUpstream:   strings.TrimSpace(cfg.ExporterUpstream),
-			ReceiverPorts:      receiverPorts,
-			ExporterPorts:      exporterPorts,
+			ID:                  id,
+			ReceiverTranslator:  receiverTranslator,
+			ExporterTranslator:  exporterTranslator,
+			ReceiverUpstream:    strings.TrimSpace(cfg.ReceiverUpstream),
+			ExporterUpstream:    strings.TrimSpace(cfg.ExporterUpstream),
+			ReceiverPorts:       receiverPorts,
+			ExporterPorts:       exporterPorts,
+			ReceiverIgnorePaths: receiverIgnorePaths,
+			ExporterIgnorePaths: exporterIgnorePaths,
 		},
 		receiverUpstream: receiverUpstream,
 		exporterUpstream: exporterUpstream,
@@ -1165,6 +1224,67 @@ func normalizePortList(rawPorts []string) ([]string, error) {
 	}
 	slices.Sort(ports)
 	return ports, nil
+}
+
+func normalizePathPatternList(rawPatterns []string) ([]string, error) {
+	if len(rawPatterns) == 0 {
+		return nil, nil
+	}
+	seen := make(map[string]struct{}, len(rawPatterns))
+	patterns := make([]string, 0, len(rawPatterns))
+	for _, raw := range rawPatterns {
+		pattern := strings.TrimSpace(raw)
+		if pattern == "" {
+			continue
+		}
+		if !strings.HasPrefix(pattern, "/") {
+			pattern = "/" + pattern
+		}
+		if strings.ContainsAny(pattern, "*?[") {
+			if _, err := path.Match(pattern, "/"); err != nil {
+				return nil, fmt.Errorf("bad path pattern %q: %w", raw, err)
+			}
+		}
+		if _, exists := seen[pattern]; exists {
+			continue
+		}
+		seen[pattern] = struct{}{}
+		patterns = append(patterns, pattern)
+	}
+	slices.Sort(patterns)
+	return patterns, nil
+}
+
+func (p configuredPair) shouldIgnorePath(source, rawPath string) bool {
+	var (
+		patterns       []string
+		candidatePaths []string
+	)
+
+	switch source {
+	case "receiver":
+		patterns = p.ReceiverIgnorePaths
+		candidatePaths = []string{rawPath}
+	case "exporter":
+		patterns = p.ExporterIgnorePaths
+		_, normalizedPath := parseExporterPath(rawPath)
+		candidatePaths = []string{normalizedPath, rawPath}
+	default:
+		return false
+	}
+
+	for _, pattern := range patterns {
+		for _, candidate := range candidatePaths {
+			if candidate == "" {
+				continue
+			}
+			matched, err := path.Match(pattern, candidate)
+			if err == nil && matched {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func requestPortCandidates(r *http.Request, listener string) []string {

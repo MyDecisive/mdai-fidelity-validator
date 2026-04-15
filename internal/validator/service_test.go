@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -471,5 +472,85 @@ func TestHandleAdminPairs(t *testing.T) {
 	if got := svc.exporterPairByPort["18081"]; got != "shadow-c" {
 		t.Fatalf("expected exporter port mapping to shadow-c, got %q", got)
 	}
+
+	body = `{"id":"shadow-d","receiver_translator":"datadog_raw","exporter_translator":"datadog_raw","exporter_ignore_paths":["/api/beta/sketches","api/v2/sketches"]}`
+	req = httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/admin/pairs", strings.NewReader(body))
+	rec = httptest.NewRecorder()
+	svc.handleAdminPairs(rec, req)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("expected status %d, got %d body=%s", http.StatusAccepted, rec.Code, rec.Body.String())
+	}
+	if got := svc.pairs["shadow-d"].ExporterIgnorePaths; !reflect.DeepEqual(got, []string{"/api/beta/sketches", "/api/v2/sketches"}) {
+		t.Fatalf("unexpected exporter ignore paths: %#v", got)
+	}
 }
 
+func TestNormalizePathPatternList(t *testing.T) {
+	got, err := normalizePathPatternList([]string{" api/beta/sketches ", "/api/beta/*", "/api/beta/sketches"})
+	if err != nil {
+		t.Fatalf("normalizePathPatternList() error = %v", err)
+	}
+	want := []string{"/api/beta/*", "/api/beta/sketches"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("normalizePathPatternList() = %#v want %#v", got, want)
+	}
+}
+
+func TestConfiguredPairShouldIgnorePath(t *testing.T) {
+	pair := configuredPair{
+		PairConfig: PairConfig{
+			ID:                  "shadow-e",
+			ExporterIgnorePaths: []string{"/api/beta/sketches", "/api/v2/*"},
+			ReceiverIgnorePaths: []string{"/v0.4/traces"},
+		},
+	}
+
+	if !pair.shouldIgnorePath("exporter", "/exporter/datadog/api/beta/sketches") {
+		t.Fatal("expected exporter path to be ignored")
+	}
+	if !pair.shouldIgnorePath("exporter", "/api/v2/series") {
+		t.Fatal("expected exporter wildcard path to be ignored")
+	}
+	if !pair.shouldIgnorePath("receiver", "/v0.4/traces") {
+		t.Fatal("expected receiver path to be ignored")
+	}
+	if pair.shouldIgnorePath("exporter", "/exporter/datadog/api/v1/validate") {
+		t.Fatal("did not expect validate path to be ignored")
+	}
+}
+
+func TestHandleExporterAPIIgnoresConfiguredPath(t *testing.T) {
+	svc := &Service{
+		logger:      zap.NewNop(),
+		defaultPair: defaultPairID,
+		pairs: map[string]configuredPair{
+			defaultPairID: {
+				PairConfig: PairConfig{
+					ID:                  defaultPairID,
+					ReceiverTranslator:  defaultTranslatorID,
+					ExporterTranslator:  defaultTranslatorID,
+					ExporterIgnorePaths: []string{"/api/beta/sketches"},
+				},
+			},
+		},
+		translators: map[string]PayloadTranslator{
+			defaultTranslatorID: datadogRawTranslator{mapping: newMappingStore(defaultFieldMapping())},
+		},
+	}
+
+	req := httptest.NewRequestWithContext(
+		t.Context(),
+		http.MethodPost,
+		"/exporter/datadog/api/beta/sketches",
+		strings.NewReader(`{"ignored":true}`),
+	)
+	rec := httptest.NewRecorder()
+
+	svc.handleExporterAPI(rec, req)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status=%d want %d body=%s", rec.Code, http.StatusAccepted, rec.Body.String())
+	}
+	if _, ok := svc.lastBySource["exporter"]; ok {
+		t.Fatal("did not expect ignored exporter payload to be captured")
+	}
+}
