@@ -54,6 +54,12 @@ signals:
       - "suffix:.operation"
       - "suffix:.resource"
   metrics:
+    correlation_id:
+      - correlation_id
+      - "contains:.tags[|tag:correlation_id"
+    fidelity_correlation_id:
+      - fidelity_correlation_id
+      - "contains:.tags[|tag:fidelity_correlation_id"
     metric_name:
       - metric_name
       - "suffix:.metric"

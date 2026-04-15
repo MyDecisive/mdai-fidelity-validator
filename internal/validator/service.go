@@ -1393,7 +1393,7 @@ func deriveFingerprintCorrelationID(signal Signal, fields map[string]string) str
 	// Stable Identity Fields by signal type
 	identityFields := map[Signal][]string{
 		SignalTraces:  {"trace_id", "traceID", "[0][0].trace_id"},
-		SignalMetrics: {"series[0].metric", "series[0].points[0][0]"},
+		SignalMetrics: {"metric_name", "point_timestamp", "series[0].metric", "series[0].points[0][0]"},
 		SignalLogs:    {"message", "timestamp", "attributes.http.url"},
 	}
 
@@ -1491,7 +1491,7 @@ func inferDatadogAPISignal(path string) Signal {
 	}
 }
 
-func decodeBody(body []byte, _, contentEncoding, contentType string) (any, string, error) {
+func decodeBody(body []byte, path, contentEncoding, contentType string) (any, string, error) {
 	var decoded []byte
 	format := "json"
 
@@ -1502,7 +1502,11 @@ func decodeBody(body []byte, _, contentEncoding, contentType string) (any, strin
 	}
 
 	if strings.Contains(strings.ToLower(contentType), "protobuf") {
-		return nil, "", errors.New("protobuf payloads are not supported in config-mapping mode")
+		payload, err := decodeDatadogSeriesProto(path, decoded)
+		if err != nil {
+			return nil, "", err
+		}
+		return payload, "protobuf", nil
 	}
 
 	if looksLikeJSON(decoded) || strings.Contains(strings.ToLower(contentType), "json") {

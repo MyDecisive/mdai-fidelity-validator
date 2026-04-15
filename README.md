@@ -103,7 +103,7 @@ Supported source expressions:
 
 Current limitation:
 
-- Protobuf Datadog payloads are not decoded in this mode.
+- Protobuf Datadog metric series payloads on `/api/v2/series` are decoded in this mode, but other protobuf Datadog payloads are still unsupported.
 
 Both files are hot-reloaded from disk, so ConfigMap volume updates are picked up without restarting the pod.
 
