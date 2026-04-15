@@ -11,9 +11,134 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+	dto "github.com/prometheus/client_model/go"
 	"github.com/vmihailenco/msgpack/v5"
 	"go.uber.org/zap"
 )
+
+type staticTranslator struct {
+	name    string
+	decoded DecodedPayload
+}
+
+func (t staticTranslator) Name() string { return t.name }
+
+func (t staticTranslator) Decode(_ Signal, _, _, _ string, _ []byte) DecodedPayload {
+	return t.decoded
+}
+
+func newMetricsTestService(connection string) (*Service, *prometheus.Registry) {
+	registry := prometheus.NewRegistry()
+
+	receivedTotal := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "mdai_fidelity_payloads_received_total",
+		Help: "Number of payloads received by connection, source, and signal.",
+	}, []string{"mdai_connection", "source", "signal"})
+	attributeEval := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "mdai_fidelity_attribute_checks_total",
+		Help: "Number of attribute comparisons by connection, signal, attribute, and result.",
+	}, []string{"mdai_connection", "signal", "attribute", "result"})
+	signalEval := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "mdai_fidelity_signal_checks_total",
+		Help: "Number of whole-signal comparisons by connection, signal, and result.",
+	}, []string{"mdai_connection", "signal", "result"})
+	requiredEval := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "mdai_fidelity_required_attribute_checks_total",
+		Help: "Number of required attribute comparisons by connection, signal, attribute, and result.",
+	}, []string{"mdai_connection", "signal", "attribute", "result"})
+	requiredSig := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "mdai_fidelity_required_signal_checks_total",
+		Help: "Number of policy-based whole-signal comparisons by connection, signal, and result.",
+	}, []string{"mdai_connection", "signal", "result"})
+	pendingGauge := prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "mdai_fidelity_pending_payloads",
+		Help: "Number of payloads waiting for their correlated counterpart by connection.",
+	}, []string{"mdai_connection"})
+
+	registry.MustRegister(receivedTotal, attributeEval, signalEval, requiredEval, requiredSig, pendingGauge)
+
+	svc := &Service{
+		logger:        zap.NewNop(),
+		shards:        make([]*shard, numShards),
+		connection:    connection,
+		lastBySource:  map[string]*observedPayload{},
+		lastByKey:     map[string]*observedPayload{},
+		translators:   map[string]PayloadTranslator{},
+		receivedTotal: receivedTotal,
+		attributeEval: attributeEval,
+		signalEval:    signalEval,
+		requiredEval:  requiredEval,
+		requiredSig:   requiredSig,
+		pendingGauge:  pendingGauge,
+	}
+
+	for i := range numShards {
+		svc.shards[i] = &shard{
+			pending:    map[string]*observedPayload{},
+			lastResult: map[string]ComparisonResult{},
+		}
+	}
+
+	return svc, registry
+}
+
+func requireMetricHasConnectionLabel(t *testing.T, registry *prometheus.Registry, metricName, connection string) {
+	t.Helper()
+
+	families, err := registry.Gather()
+	if err != nil {
+		t.Fatalf("gather metrics: %v", err)
+	}
+
+	for _, family := range families {
+		if family.GetName() != metricName {
+			continue
+		}
+		if len(family.Metric) == 0 {
+			t.Fatalf("metric %s had no series", metricName)
+		}
+		for _, metric := range family.Metric {
+			if !hasLabel(metric, "mdai_connection", connection) {
+				t.Fatalf("metric %s missing mdai_connection=%q label: %+v", metricName, connection, metric.GetLabel())
+			}
+		}
+		return
+	}
+
+	t.Fatalf("metric family %s not found", metricName)
+}
+
+func hasLabel(metric *dto.Metric, name, value string) bool {
+	for _, label := range metric.GetLabel() {
+		if label.GetName() == name && label.GetValue() == value {
+			return true
+		}
+	}
+	return false
+}
+
+func counterValue(t *testing.T, metric prometheus.Metric) float64 {
+	t.Helper()
+
+	dtoMetric := &dto.Metric{}
+	if err := metric.Write(dtoMetric); err != nil {
+		t.Fatalf("write counter metric: %v", err)
+	}
+
+	return dtoMetric.GetCounter().GetValue()
+}
+
+func gaugeValue(t *testing.T, metric prometheus.Metric) float64 {
+	t.Helper()
+
+	dtoMetric := &dto.Metric{}
+	if err := metric.Write(dtoMetric); err != nil {
+		t.Fatalf("write gauge metric: %v", err)
+	}
+
+	return dtoMetric.GetGauge().GetValue()
+}
 
 func TestComparePairPassesWhenFieldsMatch(t *testing.T) {
 	receiver := &observedPayload{
@@ -229,6 +354,108 @@ func TestSelectedHeaders(t *testing.T) {
 	if _, ok := got["X-Unused"]; ok {
 		t.Fatalf("unexpected x-unused in %#v", got)
 	}
+}
+
+func TestRecordMetricsUsesConnectionLabel(t *testing.T) {
+	svc, registry := newMetricsTestService("shadow-a")
+
+	svc.recordMetrics(ComparisonResult{
+		Signal:            SignalTraces,
+		Matched:           []string{"trace_id"},
+		Mismatched:        []AttributeDelta{{Attribute: "span_id"}},
+		MissingIn:         []MissingField{{Attribute: "service.name"}},
+		FullPayloadPassed: false,
+		Passed:            true,
+		RequiredChecks: []RequiredAttributeCheck{
+			{Attribute: "trace_id", Passed: true},
+			{Attribute: "service.name", Passed: false},
+		},
+	})
+
+	if got := counterValue(t, svc.attributeEval.WithLabelValues("shadow-a", "traces", "trace_id", "pass")); got != 1 {
+		t.Fatalf("attribute pass count=%v want 1", got)
+	}
+	if got := counterValue(t, svc.attributeEval.WithLabelValues("shadow-a", "traces", "span_id", "fail")); got != 1 {
+		t.Fatalf("attribute fail count=%v want 1", got)
+	}
+	if got := counterValue(t, svc.attributeEval.WithLabelValues("shadow-a", "traces", "service.name", "fail")); got != 1 {
+		t.Fatalf("missing-field fail count=%v want 1", got)
+	}
+	if got := counterValue(t, svc.signalEval.WithLabelValues("shadow-a", "traces", "fail")); got != 1 {
+		t.Fatalf("signal fail count=%v want 1", got)
+	}
+	if got := counterValue(t, svc.requiredSig.WithLabelValues("shadow-a", "traces", "pass")); got != 1 {
+		t.Fatalf("required signal pass count=%v want 1", got)
+	}
+	if got := counterValue(t, svc.requiredEval.WithLabelValues("shadow-a", "traces", "trace_id", "pass")); got != 1 {
+		t.Fatalf("required attribute pass count=%v want 1", got)
+	}
+	if got := counterValue(t, svc.requiredEval.WithLabelValues("shadow-a", "traces", "service.name", "fail")); got != 1 {
+		t.Fatalf("required attribute fail count=%v want 1", got)
+	}
+
+	requireMetricHasConnectionLabel(t, registry, "mdai_fidelity_attribute_checks_total", "shadow-a")
+	requireMetricHasConnectionLabel(t, registry, "mdai_fidelity_signal_checks_total", "shadow-a")
+	requireMetricHasConnectionLabel(t, registry, "mdai_fidelity_required_attribute_checks_total", "shadow-a")
+	requireMetricHasConnectionLabel(t, registry, "mdai_fidelity_required_signal_checks_total", "shadow-a")
+}
+
+func TestCaptureRequestUsesConnectionLabelForReceivedMetric(t *testing.T) {
+	svc, registry := newMetricsTestService("shadow-b")
+	svc.translators[defaultTranslatorID] = staticTranslator{
+		name: defaultTranslatorID,
+		decoded: DecodedPayload{
+			Signal:      SignalTraces,
+			Attributes:  map[string]string{},
+			Format:      "json",
+			DecodeError: "decode failed",
+		},
+	}
+
+	req := httptest.NewRequestWithContext(
+		t.Context(),
+		http.MethodPost,
+		"/v0.4/traces",
+		strings.NewReader(`{"trace_id":"123"}`),
+	)
+
+	observed, result, matched, err := svc.captureRequest(
+		defaultPairID,
+		defaultTranslatorID,
+		"receiver",
+		SignalTraces,
+		":8126",
+		"/v0.4/traces",
+		req,
+	)
+	if err != nil {
+		t.Fatalf("captureRequest() error = %v", err)
+	}
+	if observed == nil {
+		t.Fatal("expected observed payload")
+	}
+	if result != nil || matched {
+		t.Fatalf("expected no comparison for decode error, got result=%v matched=%v", result, matched)
+	}
+	if got := counterValue(t, svc.receivedTotal.WithLabelValues("shadow-b", "receiver", "traces")); got != 1 {
+		t.Fatalf("received count=%v want 1", got)
+	}
+
+	requireMetricHasConnectionLabel(t, registry, "mdai_fidelity_payloads_received_total", "shadow-b")
+}
+
+func TestUpdatePendingGaugeUsesConnectionLabel(t *testing.T) {
+	svc, registry := newMetricsTestService("shadow-c")
+	svc.shards[0].pending["traces:a"] = &observedPayload{}
+	svc.shards[1].pending["metrics:b"] = &observedPayload{}
+
+	svc.updatePendingGauge()
+
+	if got := gaugeValue(t, svc.pendingGauge.WithLabelValues("shadow-c")); got != 2 {
+		t.Fatalf("pending gauge=%v want 2", got)
+	}
+
+	requireMetricHasConnectionLabel(t, registry, "mdai_fidelity_pending_payloads", "shadow-c")
 }
 
 func TestResolveCorrelationIDFromHeaderFallbacks(t *testing.T) {

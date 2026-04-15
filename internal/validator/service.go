@@ -39,6 +39,8 @@ const (
 	defaultTranslatorID = "datadog_raw"
 	pairHeaderKey       = "X-Fidelity-Pair"
 	configReloadEnvVar  = "MDAI_CONFIG_RELOAD_INTERVAL"
+	connectionEnvVar    = "MDAI_CONNECTION_NAME"
+	defaultConnection   = "default"
 )
 
 type shard struct {
@@ -118,6 +120,7 @@ type Service struct {
 	logger     *zap.Logger
 	shards     []*shard
 	retention  time.Duration
+	connection string
 	httpClient *http.Client
 	policy     Policy
 	policyMu   sync.RWMutex
@@ -142,7 +145,7 @@ type Service struct {
 	signalEval    *prometheus.CounterVec
 	requiredEval  *prometheus.CounterVec
 	requiredSig   *prometheus.CounterVec
-	pendingGauge  prometheus.Gauge
+	pendingGauge  *prometheus.GaugeVec
 }
 
 type mappingStore struct {
@@ -261,6 +264,7 @@ func NewService(logger *zap.Logger, retention time.Duration, receiverUpstream, e
 		logger:           logger,
 		shards:           make([]*shard, numShards),
 		retention:        retention,
+		connection:       resolveConnectionName(),
 		lastBySource:     make(map[string]*observedPayload),
 		lastByKey:        make(map[string]*observedPayload),
 		httpClient:       &http.Client{Timeout: 30 * time.Second},
@@ -286,28 +290,28 @@ func NewService(logger *zap.Logger, retention time.Duration, receiverUpstream, e
 		exporterPairByPort: make(map[string]string),
 		receivedTotal: promauto.NewCounterVec(prometheus.CounterOpts{
 			Name: "mdai_fidelity_payloads_received_total",
-			Help: "Number of payloads received by source and signal.",
-		}, []string{"source", "signal"}),
+			Help: "Number of payloads received by connection, source, and signal.",
+		}, []string{"mdai_connection", "source", "signal"}),
 		attributeEval: promauto.NewCounterVec(prometheus.CounterOpts{
 			Name: "mdai_fidelity_attribute_checks_total",
-			Help: "Number of attribute comparisons by signal, attribute, and result.",
-		}, []string{"signal", "attribute", "result"}),
+			Help: "Number of attribute comparisons by connection, signal, attribute, and result.",
+		}, []string{"mdai_connection", "signal", "attribute", "result"}),
 		signalEval: promauto.NewCounterVec(prometheus.CounterOpts{
 			Name: "mdai_fidelity_signal_checks_total",
-			Help: "Number of whole-signal comparisons by signal and result.",
-		}, []string{"signal", "result"}),
+			Help: "Number of whole-signal comparisons by connection, signal, and result.",
+		}, []string{"mdai_connection", "signal", "result"}),
 		requiredEval: promauto.NewCounterVec(prometheus.CounterOpts{
 			Name: "mdai_fidelity_required_attribute_checks_total",
-			Help: "Number of required attribute comparisons by signal, attribute, and result.",
-		}, []string{"signal", "attribute", "result"}),
+			Help: "Number of required attribute comparisons by connection, signal, attribute, and result.",
+		}, []string{"mdai_connection", "signal", "attribute", "result"}),
 		requiredSig: promauto.NewCounterVec(prometheus.CounterOpts{
 			Name: "mdai_fidelity_required_signal_checks_total",
-			Help: "Number of policy-based whole-signal comparisons by signal and result.",
-		}, []string{"signal", "result"}),
-		pendingGauge: promauto.NewGauge(prometheus.GaugeOpts{
+			Help: "Number of policy-based whole-signal comparisons by connection, signal, and result.",
+		}, []string{"mdai_connection", "signal", "result"}),
+		pendingGauge: promauto.NewGaugeVec(prometheus.GaugeOpts{
 			Name: "mdai_fidelity_pending_payloads",
-			Help: "Number of payloads waiting for their correlated counterpart.",
-		}),
+			Help: "Number of payloads waiting for their correlated counterpart by connection.",
+		}, []string{"mdai_connection"}),
 	}
 
 	for i := range numShards {
@@ -825,38 +829,46 @@ func (s *Service) updatePendingGauge() {
 		total += len(sh.pending)
 		sh.mu.Unlock()
 	}
-	s.pendingGauge.Set(float64(total))
+	s.pendingGauge.WithLabelValues(s.connection).Set(float64(total))
 }
 
 func (s *Service) recordMetrics(result ComparisonResult) {
 	for _, attribute := range result.Matched {
-		s.attributeEval.WithLabelValues(string(result.Signal), attribute, "pass").Inc()
+		s.attributeEval.WithLabelValues(s.connection, string(result.Signal), attribute, "pass").Inc()
 	}
 	for _, delta := range result.Mismatched {
-		s.attributeEval.WithLabelValues(string(result.Signal), delta.Attribute, "fail").Inc()
+		s.attributeEval.WithLabelValues(s.connection, string(result.Signal), delta.Attribute, "fail").Inc()
 	}
 	for _, missing := range result.MissingIn {
-		s.attributeEval.WithLabelValues(string(result.Signal), missing.Attribute, "fail").Inc()
+		s.attributeEval.WithLabelValues(s.connection, string(result.Signal), missing.Attribute, "fail").Inc()
 	}
 
 	if result.FullPayloadPassed {
-		s.signalEval.WithLabelValues(string(result.Signal), "pass").Inc()
+		s.signalEval.WithLabelValues(s.connection, string(result.Signal), "pass").Inc()
 	} else {
-		s.signalEval.WithLabelValues(string(result.Signal), "fail").Inc()
+		s.signalEval.WithLabelValues(s.connection, string(result.Signal), "fail").Inc()
 	}
 
 	if result.Passed {
-		s.requiredSig.WithLabelValues(string(result.Signal), "pass").Inc()
+		s.requiredSig.WithLabelValues(s.connection, string(result.Signal), "pass").Inc()
 	} else {
-		s.requiredSig.WithLabelValues(string(result.Signal), "fail").Inc()
+		s.requiredSig.WithLabelValues(s.connection, string(result.Signal), "fail").Inc()
 	}
 	for _, check := range result.RequiredChecks {
 		resultLabel := "fail"
 		if check.Passed {
 			resultLabel = "pass"
 		}
-		s.requiredEval.WithLabelValues(string(result.Signal), check.Attribute, resultLabel).Inc()
+		s.requiredEval.WithLabelValues(s.connection, string(result.Signal), check.Attribute, resultLabel).Inc()
 	}
+}
+
+func resolveConnectionName() string {
+	connectionName := strings.TrimSpace(os.Getenv(connectionEnvVar))
+	if connectionName == "" {
+		return defaultConnection
+	}
+	return connectionName
 }
 
 func comparePair(a, b *observedPayload, policy Policy) ComparisonResult {
@@ -1065,7 +1077,7 @@ func (s *Service) captureRequest(pairID, translatorID, source string, signal Sig
 		flattened: fields,
 	}
 
-	s.receivedTotal.WithLabelValues(source, string(effectiveSignal)).Inc()
+	s.receivedTotal.WithLabelValues(s.connection, source, string(effectiveSignal)).Inc()
 	logCorrelationDecision(s, source, signal, correlationDecision)
 	logObservedPayload(s, observed)
 	if decodeError != "" {

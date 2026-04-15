@@ -13,12 +13,12 @@
 
 ## Prometheus metrics
 
-- `mdai_fidelity_payloads_received_total{source,signal}`
-- `mdai_fidelity_attribute_checks_total{signal,attribute,result}`
-- `mdai_fidelity_signal_checks_total{signal,result}`
-- `mdai_fidelity_required_attribute_checks_total{signal,attribute,result}`
-- `mdai_fidelity_required_signal_checks_total{signal,result}`
-- `mdai_fidelity_pending_payloads`
+- `mdai_fidelity_payloads_received_total{mdai_connection,source,signal}`
+- `mdai_fidelity_attribute_checks_total{mdai_connection,signal,attribute,result}`
+- `mdai_fidelity_signal_checks_total{mdai_connection,signal,result}`
+- `mdai_fidelity_required_attribute_checks_total{mdai_connection,signal,attribute,result}`
+- `mdai_fidelity_required_signal_checks_total{mdai_connection,signal,result}`
+- `mdai_fidelity_pending_payloads{mdai_connection}`
 
 ## Run locally
 
