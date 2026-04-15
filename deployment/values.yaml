@@ -20,6 +20,7 @@ image:
 
 env:
   adminAddr: ":8080"
+  metricsAddr: ":8888"
   datadogAgentIngestAddr: ":8126"
   exporterAPIAddr: ":18081"
   retention: "30m"
@@ -35,10 +36,16 @@ config:
 service:
   name: mdai-fidelity-validator
   type: ClusterIP
+  annotations: {}
+  labels: {}
   ports:
     - name: admin
       port: 8080
       targetPort: 8080
+      protocol: TCP
+    - name: metrics
+      port: 8888
+      targetPort: 8888
       protocol: TCP
     - name: dd-agent-ingest
       port: 8126
@@ -48,3 +55,18 @@ service:
       port: 18081
       targetPort: 18081
       protocol: TCP
+
+serviceMonitor:
+  enabled: false
+  namespace: ""
+  labels: {}
+  annotations: {}
+  interval: ""
+  scrapeTimeout: ""
+  honorLabels: true
+  path: /metrics
+  scheme: http
+  targetLabels: []
+  podTargetLabels: []
+  relabelings: []
+  metricRelabelings: []

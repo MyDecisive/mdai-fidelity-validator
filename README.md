@@ -4,7 +4,7 @@
 
 ## What it does
 
-- Exposes an admin API on `:8080`, a Datadog receiver ingest endpoint on `:8126`, and an exporter/API endpoint on `:18081` (HTTP).
+- Exposes an admin API on `:8080`, a Prometheus metrics endpoint on `:8888`, a Datadog receiver ingest endpoint on `:8126`, and an exporter/API endpoint on `:18081` (HTTP).
 - Captures raw Datadog receiver-side requests on `:8126` and raw exporter-side requests on `:18081`.
 - Decodes JSON, gzipped JSON, and MessagePack request bodies so it can inspect raw Datadog-style payloads from a receiver proxy and a Datadog exporter.
 - Flattens each decoded payload into `attribute.path -> value` form so every incoming field is explicitly denoted in the response.
@@ -40,9 +40,21 @@ Install or upgrade:
 helm upgrade --install mdai-fidelity-validator ./deployment -n mdai --create-namespace
 ```
 
+Enable Prometheus Operator scraping with a `ServiceMonitor`:
+
+```bash
+helm upgrade --install mdai-fidelity-validator ./deployment -n mdai \
+  --create-namespace \
+  --set serviceMonitor.enabled=true
+```
+
+If your Prometheus Operator selects `ServiceMonitor` objects by label, set those labels in `serviceMonitor.labels`.
+`ServiceMonitor` is the better fit here than `PodMonitor` because the chart already exposes a stable `metrics` Service on port `8888`.
+
 The chart defaults match the current listener model:
 
 - admin on `:8080`
+- metrics on `:8888`
 - receiver ingest on `:8126`
 - exporter/API endpoint on `:18081` (Service `18081 -> 18081`)
 - optional `busybox` debug sidecar enabled by default
@@ -58,8 +70,8 @@ Endpoints:
 - Raw Datadog receiver-side ingest: any Datadog intake path on `:8126`
 - Raw exporter-side ingest: `:18081/exporter/{exporter_name}/...` (for example `/exporter/datadog/api/v2/logs`)
 - Datadog API validation endpoint: `:18081/api/v1/validate`
-- `GET /results/{correlation_id}`
-- `GET /metrics`
+- `GET :8080/results/{correlation_id}`
+- `GET :8888/metrics`
 
 ### Config-driven Field Mapping (No Plugin Needed)
 

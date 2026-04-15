@@ -20,6 +20,6 @@ RUN --mount=type=cache,target=/go/pkg/mod \
 FROM gcr.io/distroless/static-debian12:nonroot
 
 COPY --from=builder /out/mdai-fidelity-validator /mdai-fidelity-validator
-EXPOSE 8080
+EXPOSE 8080 8888
 
 ENTRYPOINT ["/mdai-fidelity-validator"]

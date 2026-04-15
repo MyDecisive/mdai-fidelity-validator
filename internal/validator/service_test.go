@@ -781,3 +781,21 @@ func TestHandleExporterAPIIgnoresConfiguredPath(t *testing.T) {
 		t.Fatal("did not expect ignored exporter payload to be captured")
 	}
 }
+
+func TestAdminAndMetricsRoutesAreSplit(t *testing.T) {
+	svc := &Service{}
+
+	adminReq := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/metrics", http.NoBody)
+	adminRec := httptest.NewRecorder()
+	svc.AdminRoutes().ServeHTTP(adminRec, adminReq)
+	if adminRec.Code != http.StatusNotFound {
+		t.Fatalf("admin /metrics status=%d want %d", adminRec.Code, http.StatusNotFound)
+	}
+
+	metricsReq := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/metrics", http.NoBody)
+	metricsRec := httptest.NewRecorder()
+	svc.MetricsRoutes().ServeHTTP(metricsRec, metricsReq)
+	if metricsRec.Code != http.StatusOK {
+		t.Fatalf("metrics /metrics status=%d want %d", metricsRec.Code, http.StatusOK)
+	}
+}

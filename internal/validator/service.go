@@ -324,7 +324,6 @@ func NewService(logger *zap.Logger, retention time.Duration, receiverUpstream, e
 	return svc, nil
 }
 
-
 func configSignature(v any) (string, error) {
 	body, err := json.Marshal(v)
 	if err != nil {
@@ -336,7 +335,6 @@ func configSignature(v any) (string, error) {
 
 func (s *Service) AdminRoutes() http.Handler {
 	mux := http.NewServeMux()
-	mux.Handle("/metrics", promhttp.Handler())
 	mux.HandleFunc("/healthz", s.handleHealth)
 	mux.HandleFunc("/debug/pending", s.handleDebugPending)
 	mux.HandleFunc("/debug/last/", s.handleDebugLast)
@@ -348,6 +346,12 @@ func (s *Service) AdminRoutes() http.Handler {
 	mux.HandleFunc("/intake/exporter/", s.handleSource("exporter"))
 	mux.HandleFunc("/results/", s.handleResults)
 
+	return mux
+}
+
+func (s *Service) MetricsRoutes() http.Handler {
+	mux := http.NewServeMux()
+	mux.Handle("/metrics", promhttp.Handler())
 	return mux
 }
 
@@ -628,7 +632,6 @@ func (s *Service) handleDatadogValidate(w http.ResponseWriter, r *http.Request) 
 		"valid": true,
 	})
 }
-
 
 func (s *Service) handleExporterAPI(w http.ResponseWriter, r *http.Request) {
 	path := readRequestPath(r)
@@ -2002,7 +2005,6 @@ func writeJSON(s *Service, w http.ResponseWriter, status int, payload any) {
 		s.logger.Error("failed to write response", zap.Error(err))
 	}
 }
-
 
 func summarizePolicy(policy Policy) string {
 	signals := make([]string, 0, len(policy.Signals))

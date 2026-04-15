@@ -3,6 +3,7 @@
 set -euo pipefail
 
 VALIDATOR_ADMIN_URL="${VALIDATOR_ADMIN_URL:-http://localhost:8080}"
+VALIDATOR_METRICS_URL="${VALIDATOR_METRICS_URL:-http://localhost:8888}"
 VALIDATOR_INGRESS_URL="${VALIDATOR_INGRESS_URL:-http://localhost:8081}"
 DDMLTGEN_BIN="${DDMLTGEN_BIN:-go run ./cmd/ddmltgen}"
 TIMEOUT_SECONDS="${TIMEOUT_SECONDS:-20}"
@@ -56,14 +57,14 @@ run_signal() {
 
   echo "timed out waiting for ${signal} comparison at ${result_path}" >&2
   echo "current metrics snapshot:" >&2
-  curl -fsS "${VALIDATOR_ADMIN_URL}/metrics" | grep 'mdai_fidelity' >&2 || true
+  curl -fsS "${VALIDATOR_METRICS_URL}/metrics" | grep 'mdai_fidelity' >&2 || true
   return 1
 }
 
-echo "smoke test starting against ingress=${VALIDATOR_INGRESS_URL} admin=${VALIDATOR_ADMIN_URL}"
+echo "smoke test starting against ingress=${VALIDATOR_INGRESS_URL} admin=${VALIDATOR_ADMIN_URL} metrics=${VALIDATOR_METRICS_URL}"
 run_signal traces
 run_signal metrics
 run_signal logs
 
 echo "== prometheus metrics"
-curl -fsS "${VALIDATOR_ADMIN_URL}/metrics" | grep 'mdai_fidelity'
+curl -fsS "${VALIDATOR_METRICS_URL}/metrics" | grep 'mdai_fidelity'

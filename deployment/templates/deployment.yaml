@@ -47,6 +47,8 @@ spec:
           ports:
             - name: admin
               containerPort: 8080
+            - name: metrics
+              containerPort: 8888
             - name: dd-agent-ingest
               containerPort: 8126
             - name: exporter-api
@@ -54,6 +56,8 @@ spec:
           env:
             - name: MDAI_ADMIN_ADDR
               value: {{ .Values.env.adminAddr | quote }}
+            - name: MDAI_METRICS_ADDR
+              value: {{ .Values.env.metricsAddr | quote }}
             {{- if .Values.env.datadogAgentIngestAddr }}
             - name: MDAI_DATADOG_AGENT_INGEST_ADDR
               value: {{ .Values.env.datadogAgentIngestAddr | quote }}
