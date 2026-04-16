@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
 	"net/http"
 	"os"
 	"os/signal"
@@ -36,7 +35,7 @@ func run(logger *zap.Logger) error {
 	metricsAddr := envOrDefault("MDAI_METRICS_ADDR", ":8888")
 	ingestAddr := envOrDefault("MDAI_DATADOG_AGENT_INGEST_ADDR", ":8126")
 	exporterAPIAddr := envOrDefault("MDAI_EXPORTER_API_ADDR", ":18081")
-	retention := durationEnvOrDefault("MDAI_RETENTION", 30*time.Minute)
+	retention := durationEnvOrDefault(logger, "MDAI_RETENTION", 30*time.Minute)
 	receiverUpstream := os.Getenv("MDAI_RECEIVER_UPSTREAM")
 	exporterUpstream := os.Getenv("MDAI_EXPORTER_UPSTREAM")
 
@@ -120,13 +119,17 @@ func envOrDefault(key, fallback string) string {
 	return fallback
 }
 
-func durationEnvOrDefault(key string, fallback time.Duration) time.Duration {
+func durationEnvOrDefault(logger *zap.Logger, key string, fallback time.Duration) time.Duration {
 	if value := os.Getenv(key); value != "" {
 		parsed, err := time.ParseDuration(value)
 		if err == nil {
 			return parsed
 		}
-		log.Printf("invalid duration for %s=%q, using default %s", key, value, fallback) //nolint:gosec
+		logger.Warn("invalid duration override, using default",
+			zap.String("env_var", key),
+			zap.String("value", value),
+			zap.Duration("fallback", fallback),
+		)
 	}
 
 	return fallback
