@@ -17,8 +17,7 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
     go build -trimpath -ldflags="-w -s" -o /out/mdai-fidelity-validator ./cmd/mdai-fidelity-validator
 
-FROM gcr.io/distroless/static-debian12:nonroot
-
+FROM gcr.io/distroless/static-debian13:nonroot
 COPY --from=builder /out/mdai-fidelity-validator /mdai-fidelity-validator
 EXPOSE 8080 8888
 
