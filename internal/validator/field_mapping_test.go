@@ -4,54 +4,51 @@ import (
 	"path/filepath"
 	"runtime"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func setDefaultFieldMappingPath(t *testing.T) {
 	t.Helper()
 	_, thisFile, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("runtime.Caller(0) failed")
-	}
+	require.True(t, ok, "runtime.Caller(0) failed")
 	t.Setenv(fieldMappingPathEnvVar, filepath.Join(filepath.Dir(thisFile), "field-mapping.yaml"))
 }
 
 func TestFieldMappingMapLogs(t *testing.T) {
 	setDefaultFieldMappingPath(t)
 	mapping, _, err := loadFieldMapping()
-	if err != nil {
-		t.Fatalf("loadFieldMapping: %v", err)
-	}
+	require.NoError(t, err)
 	fields := map[string]string{
 		"[0].ddtags":  "env:dev,correlation_id:corr-1",
 		"[0].message": `{"message":"event","service":"svc-a","status":"info","timestamp":1773343955346}`,
 	}
 
 	mapped := mapping.Map(SignalLogs, fields)
-	if got := mapped["message"]; got != "event" {
-		t.Fatalf("message=%q", got)
-	}
-	if got := mapped["service"]; got != "svc-a" {
-		t.Fatalf("service=%q", got)
-	}
-	if got := mapped["correlation_id"]; got != "corr-1" {
-		t.Fatalf("correlation_id=%q", got)
-	}
+	assert.Equal(t, "event", mapped["message"])
+	assert.Equal(t, "svc-a", mapped["service"])
+	assert.Equal(t, "corr-1", mapped["correlation_id"])
 }
 
 func TestExtractMappedValueOps(t *testing.T) {
+	t.Parallel()
+
 	fields := map[string]string{
 		"raw_message": `{"inner":{"value":"abc"}}`,
 		"tags":        "env:dev,service:payments",
 	}
-	if value, ok := extractMappedValue(fields, "raw_message|json:inner.value"); !ok || value != "abc" {
-		t.Fatalf("json op value=%q ok=%v", value, ok)
-	}
-	if value, ok := extractMappedValue(fields, "tags|tag:service"); !ok || value != "payments" {
-		t.Fatalf("tag op value=%q ok=%v", value, ok)
-	}
+	value, ok := extractMappedValue(fields, "raw_message|json:inner.value")
+	require.True(t, ok)
+	assert.Equal(t, "abc", value)
+	value, ok = extractMappedValue(fields, "tags|tag:service")
+	require.True(t, ok)
+	assert.Equal(t, "payments", value)
 }
 
 func TestFieldMappingMapForPathPrefersExporterSpecificRules(t *testing.T) {
+	t.Parallel()
+
 	mapping := FieldMapping{
 		Signals: map[Signal]map[string][]string{
 			SignalLogs: {
@@ -73,12 +70,12 @@ func TestFieldMappingMapForPathPrefersExporterSpecificRules(t *testing.T) {
 		"[0].message": "datadog-msg",
 		"event":       "splunk-msg",
 	})
-	if got := mapped["message"]; got != "splunk-msg" {
-		t.Fatalf("message=%q", got)
-	}
+	assert.Equal(t, "splunk-msg", mapped["message"])
 }
 
 func TestFieldMappingMapForPathUnknownSignalSelectsBestMatch(t *testing.T) {
+	t.Parallel()
+
 	mapping := FieldMapping{
 		Signals: map[Signal]map[string][]string{
 			SignalLogs: {
@@ -95,10 +92,6 @@ func TestFieldMappingMapForPathUnknownSignalSelectsBestMatch(t *testing.T) {
 		"event":   "hello",
 		"service": "svc-a",
 	})
-	if got := mapped["message"]; got != "hello" {
-		t.Fatalf("message=%q", got)
-	}
-	if got := mapped["service"]; got != "svc-a" {
-		t.Fatalf("service=%q", got)
-	}
+	assert.Equal(t, "hello", mapped["message"])
+	assert.Equal(t, "svc-a", mapped["service"])
 }

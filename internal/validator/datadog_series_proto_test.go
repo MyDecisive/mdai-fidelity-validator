@@ -6,10 +6,14 @@ import (
 	"math"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"google.golang.org/protobuf/encoding/protowire"
 )
 
 func TestDecodeBodyDatadogSeriesProtoV3(t *testing.T) {
+	t.Parallel()
+
 	body := encodeDatadogSeriesV3Payload(
 		"app.request.count",
 		1710000000,
@@ -28,34 +32,20 @@ func TestDecodeBodyDatadogSeriesProtoV3(t *testing.T) {
 		"deflate",
 		"application/x-protobuf",
 	)
-	if err != nil {
-		t.Fatalf("decodeBody() error = %v", err)
-	}
-	if format != "protobuf" {
-		t.Fatalf("decodeBody() format = %q want %q", format, "protobuf")
-	}
+	require.NoError(t, err)
+	assert.Equal(t, "protobuf", format)
 
 	fields := flattenValueMap(payload)
-	if got := fields["series[0].metric"]; got != "app.request.count" {
-		t.Fatalf("series[0].metric = %q", got)
-	}
-	if got := fields["series[0].tags[2]"]; got != "correlation_id:corr-123" {
-		t.Fatalf("series[0].tags[2] = %q", got)
-	}
-	if got := fields["series[0].points[0][0]"]; got != "1710000000" {
-		t.Fatalf("series[0].points[0][0] = %q", got)
-	}
-	if got := fields["series[0].points[0][1]"]; got != "12.5" {
-		t.Fatalf("series[0].points[0][1] = %q", got)
-	}
+	assert.Equal(t, "app.request.count", fields["series[0].metric"])
+	assert.Equal(t, "correlation_id:corr-123", fields["series[0].tags[2]"])
+	assert.Equal(t, "1710000000", fields["series[0].points[0][0]"])
+	assert.Equal(t, "12.5", fields["series[0].points[0][1]"])
 }
 
 func TestDatadogFieldMappingExtractsCorrelationFromSeriesProtoV3(t *testing.T) {
 	setDefaultFieldMappingPath(t)
 	mapping, _, err := loadFieldMapping()
-	if err != nil {
-		t.Fatalf("loadFieldMapping: %v", err)
-	}
+	require.NoError(t, err)
 
 	body := deflateBytes(t, encodeDatadogSeriesV3Payload(
 		"app.request.count",
@@ -74,29 +64,15 @@ func TestDatadogFieldMappingExtractsCorrelationFromSeriesProtoV3(t *testing.T) {
 		"deflate",
 		"application/x-protobuf",
 	)
-	if err != nil {
-		t.Fatalf("decodeBody() error = %v", err)
-	}
-	if format != "protobuf" {
-		t.Fatalf("format = %q want %q", format, "protobuf")
-	}
+	require.NoError(t, err)
+	assert.Equal(t, "protobuf", format)
 
 	fields := mapping.MapForPath(SignalMetrics, "/exporter/datadog/api/v2/series", flattenValueMap(payload))
-	if got := fields["correlation_id"]; got != "corr-123" {
-		t.Fatalf("correlation_id = %q", got)
-	}
-	if got := fields["metric_name"]; got != "app.request.count" {
-		t.Fatalf("metric_name = %q", got)
-	}
-	if got := fields["service"]; got != "checkout" {
-		t.Fatalf("service = %q", got)
-	}
-	if got := fields["env"]; got != "prod" {
-		t.Fatalf("env = %q", got)
-	}
-	if got := fields["point_value"]; got != "12.5" {
-		t.Fatalf("point_value = %q", got)
-	}
+	assert.Equal(t, "corr-123", fields["correlation_id"])
+	assert.Equal(t, "app.request.count", fields["metric_name"])
+	assert.Equal(t, "checkout", fields["service"])
+	assert.Equal(t, "prod", fields["env"])
+	assert.Equal(t, "12.5", fields["point_value"])
 }
 
 func encodeDatadogSeriesV3Payload(metric string, timestamp int64, value float64, tags []string) []byte {
@@ -170,12 +146,9 @@ func deflateBytes(t *testing.T, body []byte) []byte {
 
 	var compressed bytes.Buffer
 	writer := zlib.NewWriter(&compressed)
-	if _, err := writer.Write(body); err != nil {
-		t.Fatalf("writer.Write: %v", err)
-	}
-	if err := writer.Close(); err != nil {
-		t.Fatalf("writer.Close: %v", err)
-	}
+	_, err := writer.Write(body)
+	require.NoError(t, err)
+	require.NoError(t, writer.Close())
 	return compressed.Bytes()
 }
 

@@ -13,6 +13,8 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"github.com/vmihailenco/msgpack/v5"
 	"go.uber.org/zap"
 )
@@ -87,26 +89,20 @@ func requireMetricHasConnectionLabel(t *testing.T, registry *prometheus.Registry
 	t.Helper()
 
 	families, err := registry.Gather()
-	if err != nil {
-		t.Fatalf("gather metrics: %v", err)
-	}
+	require.NoError(t, err)
 
 	for _, family := range families {
 		if family.GetName() != metricName {
 			continue
 		}
-		if len(family.Metric) == 0 {
-			t.Fatalf("metric %s had no series", metricName)
-		}
+		require.NotEmpty(t, family.Metric, "metric %s had no series", metricName)
 		for _, metric := range family.Metric {
-			if !hasLabel(metric, "mdai_connection", connection) {
-				t.Fatalf("metric %s missing mdai_connection=%q label: %+v", metricName, connection, metric.GetLabel())
-			}
+			assert.True(t, hasLabel(metric, "mdai_connection", connection), "metric %s missing mdai_connection=%q label: %+v", metricName, connection, metric.GetLabel())
 		}
 		return
 	}
 
-	t.Fatalf("metric family %s not found", metricName)
+	require.Failf(t, "metric family missing", "metric family %s not found", metricName)
 }
 
 func hasLabel(metric *dto.Metric, name, value string) bool {
@@ -122,9 +118,7 @@ func counterValue(t *testing.T, metric prometheus.Metric) float64 {
 	t.Helper()
 
 	dtoMetric := &dto.Metric{}
-	if err := metric.Write(dtoMetric); err != nil {
-		t.Fatalf("write counter metric: %v", err)
-	}
+	require.NoError(t, metric.Write(dtoMetric))
 
 	return dtoMetric.GetCounter().GetValue()
 }
@@ -133,14 +127,14 @@ func gaugeValue(t *testing.T, metric prometheus.Metric) float64 {
 	t.Helper()
 
 	dtoMetric := &dto.Metric{}
-	if err := metric.Write(dtoMetric); err != nil {
-		t.Fatalf("write gauge metric: %v", err)
-	}
+	require.NoError(t, metric.Write(dtoMetric))
 
 	return dtoMetric.GetGauge().GetValue()
 }
 
 func TestComparePairPassesWhenFieldsMatch(t *testing.T) {
+	t.Parallel()
+
 	receiver := &observedPayload{
 		source:      "receiver",
 		signal:      "traces",
@@ -163,15 +157,13 @@ func TestComparePairPassesWhenFieldsMatch(t *testing.T) {
 	}
 
 	result := comparePair(receiver, exporter, Policy{})
-	if !result.Passed {
-		t.Fatalf("expected pass, got %#v", result)
-	}
-	if len(result.Matched) != 2 {
-		t.Fatalf("expected 2 matched fields, got %d", len(result.Matched))
-	}
+	assert.True(t, result.Passed, "expected pass, got %#v", result)
+	assert.Len(t, result.Matched, 2)
 }
 
 func TestComparePairFailsWhenFieldsDiffer(t *testing.T) {
+	t.Parallel()
+
 	receiver := &observedPayload{
 		source:      "receiver",
 		signal:      "metrics",
@@ -195,85 +187,62 @@ func TestComparePairFailsWhenFieldsDiffer(t *testing.T) {
 	}
 
 	result := comparePair(receiver, exporter, Policy{})
-	if result.FullPayloadPassed {
-		t.Fatalf("expected failure, got %#v", result)
-	}
-	if len(result.Mismatched) != 1 {
-		t.Fatalf("expected 1 mismatched field, got %d", len(result.Mismatched))
-	}
-	if len(result.MissingIn) != 1 {
-		t.Fatalf("expected 1 missing field, got %d", len(result.MissingIn))
-	}
+	assert.False(t, result.FullPayloadPassed, "expected failure, got %#v", result)
+	assert.Len(t, result.Mismatched, 1)
+	assert.Len(t, result.MissingIn, 1)
 }
 
 func TestFlattenValueMap(t *testing.T) {
+	t.Parallel()
+
 	var payload any
-	if err := json.Unmarshal([]byte(`{"resource":{"attributes":[{"key":"service.name","value":"demo"}]},"value":1,"ok":true}`), &payload); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
+	require.NoError(t, json.Unmarshal([]byte(`{"resource":{"attributes":[{"key":"service.name","value":"demo"}]},"value":1,"ok":true}`), &payload))
 
 	fields := flattenValueMap(payload)
 
-	if fields["resource.attributes[0].key"] != "service.name" {
-		t.Fatalf("unexpected key field: %#v", fields)
-	}
-	if fields["value"] != "1" {
-		t.Fatalf("unexpected numeric field: %#v", fields)
-	}
-	if fields["ok"] != "true" {
-		t.Fatalf("unexpected bool field: %#v", fields)
-	}
+	assert.Equal(t, "service.name", fields["resource.attributes[0].key"])
+	assert.Equal(t, "1", fields["value"])
+	assert.Equal(t, "true", fields["ok"])
 }
 
 func TestDecodeBodyJSONGzip(t *testing.T) {
+	t.Parallel()
+
 	var compressed bytes.Buffer
 	writer := gzip.NewWriter(&compressed)
-	if _, err := writer.Write([]byte(`{"correlation_id":"demo-1","value":1}`)); err != nil {
-		t.Fatalf("write gzip: %v", err)
-	}
-	if err := writer.Close(); err != nil {
-		t.Fatalf("close gzip: %v", err)
-	}
+	_, err := writer.Write([]byte(`{"correlation_id":"demo-1","value":1}`))
+	require.NoError(t, err)
+	require.NoError(t, writer.Close())
 
 	payload, format, err := decodeBody(compressed.Bytes(), "", "gzip", "application/json")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if format != "json" {
-		t.Fatalf("expected json format, got %q", format)
-	}
+	require.NoError(t, err)
+	assert.Equal(t, "json", format)
 
 	fields := flattenValueMap(payload)
-	if fields["correlation_id"] != "demo-1" {
-		t.Fatalf("unexpected fields: %#v", fields)
-	}
+	assert.Equal(t, "demo-1", fields["correlation_id"])
 }
 
 func TestDecodeBodyMsgpack(t *testing.T) {
+	t.Parallel()
+
 	body, err := msgpack.Marshal(map[string]any{
 		"resource": map[string]any{
 			"correlation_id": "raw-dd-1",
 		},
 	})
-	if err != nil {
-		t.Fatalf("marshal msgpack: %v", err)
-	}
+	require.NoError(t, err)
 
 	payload, format, err := decodeBody(body, "", "", "application/msgpack")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if format != "msgpack" {
-		t.Fatalf("expected msgpack format, got %q", format)
-	}
+	require.NoError(t, err)
+	assert.Equal(t, "msgpack", format)
 
 	fields := flattenValueMap(payload)
-	if fields["resource.correlation_id"] != "raw-dd-1" {
-		t.Fatalf("unexpected fields: %#v", fields)
-	}
+	assert.Equal(t, "raw-dd-1", fields["resource.correlation_id"])
 }
 
 func TestCorrelationCandidatesPreferCorrelationIDPaths(t *testing.T) {
+	t.Parallel()
+
 	fields := map[string]string{
 		"spans[0].meta.correlation_id":  "dd-span-1",
 		"resource.correlation_id":       "resource-1",
@@ -285,15 +254,13 @@ func TestCorrelationCandidatesPreferCorrelationIDPaths(t *testing.T) {
 	}
 
 	candidates := correlationCandidates(fields)
-	if len(candidates) == 0 {
-		t.Fatal("expected non-empty candidates")
-	}
-	if candidates[0] != "resource.correlation_id" && candidates[0] != "correlation_id" {
-		t.Fatalf("expected correlation_id path to be preferred, got %q", candidates[0])
-	}
+	require.NotEmpty(t, candidates)
+	assert.Contains(t, []string{"resource.correlation_id", "correlation_id"}, candidates[0])
 }
 
 func TestInferSignalFromDatadogPath(t *testing.T) {
+	t.Parallel()
+
 	cases := map[string]Signal{
 		"/v0.4/traces":                SignalTraces,
 		"/api/v1/series":              SignalMetrics,
@@ -303,13 +270,13 @@ func TestInferSignalFromDatadogPath(t *testing.T) {
 	}
 
 	for path, want := range cases {
-		if got := inferSignalFromDatadogPath(path); got != want {
-			t.Fatalf("inferSignalFromDatadogPath(%q)=%q want %q", path, got, want)
-		}
+		assert.Equal(t, want, inferSignalFromDatadogPath(path), "path=%s", path)
 	}
 }
 
 func TestParseExporterPath(t *testing.T) {
+	t.Parallel()
+
 	cases := []struct {
 		path           string
 		wantExporter   string
@@ -323,13 +290,14 @@ func TestParseExporterPath(t *testing.T) {
 
 	for _, tc := range cases {
 		gotExporter, gotNormalized := parseExporterPath(tc.path)
-		if gotExporter != tc.wantExporter || gotNormalized != tc.wantNormalized {
-			t.Fatalf("parseExporterPath(%q)=(%q,%q) want (%q,%q)", tc.path, gotExporter, gotNormalized, tc.wantExporter, tc.wantNormalized)
-		}
+		assert.Equal(t, tc.wantExporter, gotExporter, "path=%s", tc.path)
+		assert.Equal(t, tc.wantNormalized, gotNormalized, "path=%s", tc.path)
 	}
 }
 
 func TestSelectedHeaders(t *testing.T) {
+	t.Parallel()
+
 	header := http.Header{}
 	header.Set("Content-Type", "application/msgpack")
 	header.Set("Dd-Api-Key", "secret")
@@ -337,21 +305,16 @@ func TestSelectedHeaders(t *testing.T) {
 	header.Set("X-Unused", "ignored")
 
 	got := selectedHeaders(header)
-	if got["Content-Type"] != "application/msgpack" {
-		t.Fatalf("unexpected content type: %#v", got)
-	}
-	if got["DD-API-KEY"] != "secret" {
-		t.Fatalf("unexpected dd api key: %#v", got)
-	}
-	if got["X-Request-ID"] != "req-1" {
-		t.Fatalf("unexpected x-request-id: %#v", got)
-	}
-	if _, ok := got["X-Unused"]; ok {
-		t.Fatalf("unexpected x-unused in %#v", got)
-	}
+	assert.Equal(t, "application/msgpack", got["Content-Type"])
+	assert.Equal(t, "secret", got["DD-API-KEY"])
+	assert.Equal(t, "req-1", got["X-Request-ID"])
+	_, ok := got["X-Unused"]
+	assert.False(t, ok, "unexpected x-unused in %#v", got)
 }
 
 func TestRecordMetricsUsesConnectionLabel(t *testing.T) {
+	t.Parallel()
+
 	svc, registry := newMetricsTestService("shadow-a")
 
 	svc.recordMetrics(ComparisonResult{
@@ -367,27 +330,13 @@ func TestRecordMetricsUsesConnectionLabel(t *testing.T) {
 		},
 	})
 
-	if got := counterValue(t, svc.attributeEval.WithLabelValues("shadow-a", "traces", "trace_id", "pass")); got != 1 {
-		t.Fatalf("attribute pass count=%v want 1", got)
-	}
-	if got := counterValue(t, svc.attributeEval.WithLabelValues("shadow-a", "traces", "span_id", "fail")); got != 1 {
-		t.Fatalf("attribute fail count=%v want 1", got)
-	}
-	if got := counterValue(t, svc.attributeEval.WithLabelValues("shadow-a", "traces", "service.name", "fail")); got != 1 {
-		t.Fatalf("missing-field fail count=%v want 1", got)
-	}
-	if got := counterValue(t, svc.signalEval.WithLabelValues("shadow-a", "traces", "fail")); got != 1 {
-		t.Fatalf("signal fail count=%v want 1", got)
-	}
-	if got := counterValue(t, svc.requiredSig.WithLabelValues("shadow-a", "traces", "pass")); got != 1 {
-		t.Fatalf("required signal pass count=%v want 1", got)
-	}
-	if got := counterValue(t, svc.requiredEval.WithLabelValues("shadow-a", "traces", "trace_id", "pass")); got != 1 {
-		t.Fatalf("required attribute pass count=%v want 1", got)
-	}
-	if got := counterValue(t, svc.requiredEval.WithLabelValues("shadow-a", "traces", "service.name", "fail")); got != 1 {
-		t.Fatalf("required attribute fail count=%v want 1", got)
-	}
+	assert.Equal(t, float64(1), counterValue(t, svc.attributeEval.WithLabelValues("shadow-a", "traces", "trace_id", "pass")))
+	assert.Equal(t, float64(1), counterValue(t, svc.attributeEval.WithLabelValues("shadow-a", "traces", "span_id", "fail")))
+	assert.Equal(t, float64(1), counterValue(t, svc.attributeEval.WithLabelValues("shadow-a", "traces", "service.name", "fail")))
+	assert.Equal(t, float64(1), counterValue(t, svc.signalEval.WithLabelValues("shadow-a", "traces", "fail")))
+	assert.Equal(t, float64(1), counterValue(t, svc.requiredSig.WithLabelValues("shadow-a", "traces", "pass")))
+	assert.Equal(t, float64(1), counterValue(t, svc.requiredEval.WithLabelValues("shadow-a", "traces", "trace_id", "pass")))
+	assert.Equal(t, float64(1), counterValue(t, svc.requiredEval.WithLabelValues("shadow-a", "traces", "service.name", "fail")))
 
 	requireMetricHasConnectionLabel(t, registry, "mdai_fidelity_attribute_checks_total", "shadow-a")
 	requireMetricHasConnectionLabel(t, registry, "mdai_fidelity_signal_checks_total", "shadow-a")
@@ -396,6 +345,8 @@ func TestRecordMetricsUsesConnectionLabel(t *testing.T) {
 }
 
 func TestCaptureRequestUsesConnectionLabelForReceivedMetric(t *testing.T) {
+	t.Parallel()
+
 	svc, registry := newMetricsTestService("shadow-b")
 	svc.translators[defaultTranslatorID] = staticTranslator{
 		name: defaultTranslatorID,
@@ -423,51 +374,49 @@ func TestCaptureRequestUsesConnectionLabelForReceivedMetric(t *testing.T) {
 		"/v0.4/traces",
 		req,
 	)
-	if err != nil {
-		t.Fatalf("captureRequest() error = %v", err)
-	}
-	if observed == nil {
-		t.Fatal("expected observed payload")
-	}
-	if result != nil || matched {
-		t.Fatalf("expected no comparison for decode error, got result=%v matched=%v", result, matched)
-	}
-	if got := counterValue(t, svc.receivedTotal.WithLabelValues("shadow-b", "receiver", "traces")); got != 1 {
-		t.Fatalf("received count=%v want 1", got)
-	}
+	require.NoError(t, err)
+	require.NotNil(t, observed)
+	assert.Nil(t, result)
+	assert.False(t, matched)
+	assert.Equal(t, float64(1), counterValue(t, svc.receivedTotal.WithLabelValues("shadow-b", "receiver", "traces")))
 
 	requireMetricHasConnectionLabel(t, registry, "mdai_fidelity_payloads_received_total", "shadow-b")
 }
 
 func TestUpdatePendingGaugeUsesConnectionLabel(t *testing.T) {
+	t.Parallel()
+
 	svc, registry := newMetricsTestService("shadow-c")
 	svc.shards[0].pending["traces:a"] = &observedPayload{}
 	svc.shards[1].pending["metrics:b"] = &observedPayload{}
 
 	svc.updatePendingGauge()
 
-	if got := gaugeValue(t, svc.pendingGauge.WithLabelValues("shadow-c")); got != 2 {
-		t.Fatalf("pending gauge=%v want 2", got)
-	}
+	assert.Equal(t, float64(2), gaugeValue(t, svc.pendingGauge.WithLabelValues("shadow-c")))
 
 	requireMetricHasConnectionLabel(t, registry, "mdai_fidelity_pending_payloads", "shadow-c")
 }
 
 func TestResolveCorrelationIDFromHeaderFallbacks(t *testing.T) {
+	t.Parallel()
+
 	fields := map[string]string{}
 	body := []byte(`{"message":"hello"}`)
 
 	t.Run("x-request-id", func(t *testing.T) {
+		t.Parallel()
 		headers := http.Header{}
 		headers.Set("X-Request-ID", "req-123")
 		got := resolveCorrelationID(SignalLogs, fields, headers, body)
-		if got.CorrelationID != "logs:req-123" || got.Strategy != "header" || got.Field != "X-Request-ID" {
-			t.Fatalf("unexpected decision: %+v", got)
-		}
+		assert.Equal(t, "logs:req-123", got.CorrelationID)
+		assert.Equal(t, "header", got.Strategy)
+		assert.Equal(t, "X-Request-ID", got.Field)
 	})
 }
 
 func TestResolveCorrelationIDPrefersHeaderOverField(t *testing.T) {
+	t.Parallel()
+
 	fields := map[string]string{
 		"correlation_id": "from-field",
 	}
@@ -475,12 +424,14 @@ func TestResolveCorrelationIDPrefersHeaderOverField(t *testing.T) {
 	headers.Set("X-Correlation-ID", "from-header")
 
 	got := resolveCorrelationID(SignalLogs, fields, headers, []byte(`{"message":"hello"}`))
-	if got.CorrelationID != "logs:from-header" || got.Strategy != "header" || got.Field != "X-Correlation-ID" {
-		t.Fatalf("unexpected decision: %+v", got)
-	}
+	assert.Equal(t, "logs:from-header", got.CorrelationID)
+	assert.Equal(t, "header", got.Strategy)
+	assert.Equal(t, "X-Correlation-ID", got.Field)
 }
 
 func TestDeriveCorrelationFromMetricTagsBeforeMetricName(t *testing.T) {
+	t.Parallel()
+
 	fields := map[string]string{
 		"series[0].metric":  "ddgen.checkout.duration",
 		"series[0].tags[0]": "service:checkout",
@@ -488,23 +439,23 @@ func TestDeriveCorrelationFromMetricTagsBeforeMetricName(t *testing.T) {
 	}
 
 	got := deriveCorrelationFromFields("metrics", fields)
-	if got != "metrics:corr-123" {
-		t.Fatalf("deriveCorrelationFromFields()=%q want %q", got, "metrics:corr-123")
-	}
+	assert.Equal(t, "metrics:corr-123", got)
 }
 
 func TestDeriveCorrelationFromLogDDTags(t *testing.T) {
+	t.Parallel()
+
 	fields := map[string]string{
 		"[0].ddtags": "env:dev,correlation_id:corr-log-1",
 	}
 
 	got := deriveCorrelationFromFields("logs", fields)
-	if got != "logs:corr-log-1" {
-		t.Fatalf("deriveCorrelationFromFields()=%q want %q", got, "logs:corr-log-1")
-	}
+	assert.Equal(t, "logs:corr-log-1", got)
 }
 
 func TestComparePairNormalizesSingleLogArrayPrefix(t *testing.T) {
+	t.Parallel()
+
 	receiver := &observedPayload{
 		source:      "receiver",
 		signal:      "logs",
@@ -527,15 +478,13 @@ func TestComparePairNormalizesSingleLogArrayPrefix(t *testing.T) {
 	}
 
 	result := comparePair(receiver, exporter, Policy{})
-	if !result.FullPayloadPassed {
-		t.Fatalf("expected full payload pass, got %#v", result)
-	}
-	if len(result.Matched) != 2 {
-		t.Fatalf("expected 2 matched fields, got %d", len(result.Matched))
-	}
+	assert.True(t, result.FullPayloadPassed, "expected full payload pass, got %#v", result)
+	assert.Len(t, result.Matched, 2)
 }
 
 func TestComparePairStripsCorrelationFromLogDDTags(t *testing.T) {
+	t.Parallel()
+
 	receiver := &observedPayload{
 		source:      "receiver",
 		signal:      "logs",
@@ -556,12 +505,12 @@ func TestComparePairStripsCorrelationFromLogDDTags(t *testing.T) {
 	}
 
 	result := comparePair(receiver, exporter, Policy{})
-	if !result.FullPayloadPassed {
-		t.Fatalf("expected full payload pass, got %#v", result)
-	}
+	assert.True(t, result.FullPayloadPassed, "expected full payload pass, got %#v", result)
 }
 
 func TestComparePairStripsCorrelationFromLogMessageJSON(t *testing.T) {
+	t.Parallel()
+
 	receiver := &observedPayload{
 		source:      "receiver",
 		signal:      "logs",
@@ -582,12 +531,12 @@ func TestComparePairStripsCorrelationFromLogMessageJSON(t *testing.T) {
 	}
 
 	result := comparePair(receiver, exporter, Policy{})
-	if !result.FullPayloadPassed {
-		t.Fatalf("expected full payload pass, got %#v", result)
-	}
+	assert.True(t, result.FullPayloadPassed, "expected full payload pass, got %#v", result)
 }
 
 func TestResolvePairForRequest(t *testing.T) {
+	t.Parallel()
+
 	svc := &Service{
 		logger:      zap.NewNop(),
 		defaultPair: defaultPairID,
@@ -614,24 +563,20 @@ func TestResolvePairForRequest(t *testing.T) {
 
 	req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/v0.4/traces", http.NoBody)
 	gotDefault := svc.resolvePairForRequest(req, "receiver", ":8126")
-	if gotDefault.ID != defaultPairID {
-		t.Fatalf("expected default pair %q, got %q", defaultPairID, gotDefault.ID)
-	}
+	assert.Equal(t, defaultPairID, gotDefault.ID)
 
 	req.Header.Set("X-Forwarded-Port", "18126")
 	gotPortMapped := svc.resolvePairForRequest(req, "receiver", ":8126")
-	if gotPortMapped.ID != "shadow-a" {
-		t.Fatalf("expected port-mapped pair shadow-a, got %q", gotPortMapped.ID)
-	}
+	assert.Equal(t, "shadow-a", gotPortMapped.ID)
 
 	req.Header.Set(pairHeaderKey, "shadow-a")
 	gotNamed := svc.resolvePairForRequest(req, "receiver", ":8126")
-	if gotNamed.ID != "shadow-a" {
-		t.Fatalf("expected pair shadow-a, got %q", gotNamed.ID)
-	}
+	assert.Equal(t, "shadow-a", gotNamed.ID)
 }
 
 func TestHandleAdminPairs(t *testing.T) {
+	t.Parallel()
+
 	svc := &Service{
 		logger:      zap.NewNop(),
 		defaultPair: defaultPairID,
@@ -654,62 +599,44 @@ func TestHandleAdminPairs(t *testing.T) {
 	rec := httptest.NewRecorder()
 
 	svc.handleAdminPairs(rec, req)
-	if rec.Code != http.StatusAccepted {
-		t.Fatalf("expected status %d, got %d body=%s", http.StatusAccepted, rec.Code, rec.Body.String())
-	}
+	require.Equal(t, http.StatusAccepted, rec.Code, "body=%s", rec.Body.String())
 
 	pair, ok := svc.pairs["shadow-b"]
-	if !ok {
-		t.Fatal("expected pair shadow-b to be saved")
-	}
-	if pair.receiverUpstream == nil || pair.receiverUpstream.String() != "http://receiver.example:8126" {
-		t.Fatalf("unexpected receiver upstream: %+v", pair.receiverUpstream)
-	}
-	if pair.exporterUpstream == nil || pair.exporterUpstream.String() != "http://exporter.example:8081" {
-		t.Fatalf("unexpected exporter upstream: %+v", pair.exporterUpstream)
-	}
-	if svc.defaultPair != "shadow-b" {
-		t.Fatalf("expected default pair shadow-b, got %q", svc.defaultPair)
-	}
+	require.True(t, ok, "expected pair shadow-b to be saved")
+	require.NotNil(t, pair.receiverUpstream)
+	assert.Equal(t, "http://receiver.example:8126", pair.receiverUpstream.String())
+	require.NotNil(t, pair.exporterUpstream)
+	assert.Equal(t, "http://exporter.example:8081", pair.exporterUpstream.String())
+	assert.Equal(t, "shadow-b", svc.defaultPair)
 
 	body = `{"id":"shadow-c","receiver_translator":"datadog_raw","exporter_translator":"datadog_raw","receiver_ports":["18126"],"exporter_ports":["18081"]}`
 	req = httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/admin/pairs", strings.NewReader(body))
 	rec = httptest.NewRecorder()
 	svc.handleAdminPairs(rec, req)
-	if rec.Code != http.StatusAccepted {
-		t.Fatalf("expected status %d, got %d body=%s", http.StatusAccepted, rec.Code, rec.Body.String())
-	}
-	if got := svc.receiverPairByPort["18126"]; got != "shadow-c" {
-		t.Fatalf("expected receiver port mapping to shadow-c, got %q", got)
-	}
-	if got := svc.exporterPairByPort["18081"]; got != "shadow-c" {
-		t.Fatalf("expected exporter port mapping to shadow-c, got %q", got)
-	}
+	require.Equal(t, http.StatusAccepted, rec.Code, "body=%s", rec.Body.String())
+	assert.Equal(t, "shadow-c", svc.receiverPairByPort["18126"])
+	assert.Equal(t, "shadow-c", svc.exporterPairByPort["18081"])
 
 	body = `{"id":"shadow-d","receiver_translator":"datadog_raw","exporter_translator":"datadog_raw","exporter_ignore_paths":["/api/beta/sketches","api/v2/sketches"]}`
 	req = httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/admin/pairs", strings.NewReader(body))
 	rec = httptest.NewRecorder()
 	svc.handleAdminPairs(rec, req)
-	if rec.Code != http.StatusAccepted {
-		t.Fatalf("expected status %d, got %d body=%s", http.StatusAccepted, rec.Code, rec.Body.String())
-	}
-	if got := svc.pairs["shadow-d"].ExporterIgnorePaths; !reflect.DeepEqual(got, []string{"/api/beta/sketches", "/api/v2/sketches"}) {
-		t.Fatalf("unexpected exporter ignore paths: %#v", got)
-	}
+	require.Equal(t, http.StatusAccepted, rec.Code, "body=%s", rec.Body.String())
+	assert.True(t, reflect.DeepEqual(svc.pairs["shadow-d"].ExporterIgnorePaths, []string{"/api/beta/sketches", "/api/v2/sketches"}), "unexpected exporter ignore paths: %#v", svc.pairs["shadow-d"].ExporterIgnorePaths)
 }
 
 func TestNormalizePathPatternList(t *testing.T) {
+	t.Parallel()
+
 	got, err := normalizePathPatternList([]string{" api/beta/sketches ", "/api/beta/*", "/api/beta/sketches"})
-	if err != nil {
-		t.Fatalf("normalizePathPatternList() error = %v", err)
-	}
+	require.NoError(t, err)
 	want := []string{"/api/beta/*", "/api/beta/sketches"}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("normalizePathPatternList() = %#v want %#v", got, want)
-	}
+	assert.True(t, reflect.DeepEqual(got, want), "normalizePathPatternList() = %#v want %#v", got, want)
 }
 
 func TestConfiguredPairShouldIgnorePath(t *testing.T) {
+	t.Parallel()
+
 	pair := configuredPair{
 		PairConfig: PairConfig{
 			ID:                  "shadow-e",
@@ -718,21 +645,15 @@ func TestConfiguredPairShouldIgnorePath(t *testing.T) {
 		},
 	}
 
-	if !pair.shouldIgnorePath("exporter", "/exporter/datadog/api/beta/sketches") {
-		t.Fatal("expected exporter path to be ignored")
-	}
-	if !pair.shouldIgnorePath("exporter", "/api/v2/series") {
-		t.Fatal("expected exporter wildcard path to be ignored")
-	}
-	if !pair.shouldIgnorePath("receiver", "/v0.4/traces") {
-		t.Fatal("expected receiver path to be ignored")
-	}
-	if pair.shouldIgnorePath("exporter", "/exporter/datadog/api/v1/validate") {
-		t.Fatal("did not expect validate path to be ignored")
-	}
+	assert.True(t, pair.shouldIgnorePath("exporter", "/exporter/datadog/api/beta/sketches"))
+	assert.True(t, pair.shouldIgnorePath("exporter", "/api/v2/series"))
+	assert.True(t, pair.shouldIgnorePath("receiver", "/v0.4/traces"))
+	assert.False(t, pair.shouldIgnorePath("exporter", "/exporter/datadog/api/v1/validate"))
 }
 
 func TestHandleExporterAPIIgnoresConfiguredPath(t *testing.T) {
+	t.Parallel()
+
 	svc := &Service{
 		logger:      zap.NewNop(),
 		defaultPair: defaultPairID,
@@ -760,28 +681,23 @@ func TestHandleExporterAPIIgnoresConfiguredPath(t *testing.T) {
 	rec := httptest.NewRecorder()
 
 	svc.handleExporterAPI(rec, req)
-	if rec.Code != http.StatusAccepted {
-		t.Fatalf("status=%d want %d body=%s", rec.Code, http.StatusAccepted, rec.Body.String())
-	}
-	if _, ok := svc.lastBySource["exporter"]; ok {
-		t.Fatal("did not expect ignored exporter payload to be captured")
-	}
+	require.Equal(t, http.StatusAccepted, rec.Code, "body=%s", rec.Body.String())
+	_, ok := svc.lastBySource["exporter"]
+	assert.False(t, ok, "did not expect ignored exporter payload to be captured")
 }
 
 func TestAdminAndMetricsRoutesAreSplit(t *testing.T) {
+	t.Parallel()
+
 	svc := &Service{}
 
 	adminReq := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/metrics", http.NoBody)
 	adminRec := httptest.NewRecorder()
 	svc.AdminRoutes().ServeHTTP(adminRec, adminReq)
-	if adminRec.Code != http.StatusNotFound {
-		t.Fatalf("admin /metrics status=%d want %d", adminRec.Code, http.StatusNotFound)
-	}
+	assert.Equal(t, http.StatusNotFound, adminRec.Code)
 
 	metricsReq := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/metrics", http.NoBody)
 	metricsRec := httptest.NewRecorder()
 	svc.MetricsRoutes().ServeHTTP(metricsRec, metricsReq)
-	if metricsRec.Code != http.StatusOK {
-		t.Fatalf("metrics /metrics status=%d want %d", metricsRec.Code, http.StatusOK)
-	}
+	assert.Equal(t, http.StatusOK, metricsRec.Code)
 }

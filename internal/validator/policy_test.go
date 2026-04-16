@@ -3,6 +3,8 @@ package validator
 import (
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"gopkg.in/yaml.v3"
 )
 
@@ -13,23 +15,12 @@ func TestCanonicalizeDatadogFieldsLogs(t *testing.T) {
 		"[0].message": `{"ddsource":"mdai-fidelity-validator","hostname":"localhost","message":"ddgen synthetic log event","service":"ddgen-svc","status":"info","timestamp":1773343955346}`,
 	}
 	mapping, _, err := loadFieldMapping()
-	if err != nil {
-		t.Fatalf("loadFieldMapping: %v", err)
-	}
+	require.NoError(t, err)
 	canonical := mapping.Map(SignalLogs, fields)
 
-	if got := canonical["service"]; got != "ddgen-svc" {
-		t.Fatalf("service=%q", got)
-	}
-
-	if got := canonical["message"]; got != "ddgen synthetic log event" {
-		t.Fatalf("message=%q", got)
-	}
-
-	if got := canonical["correlation_id"]; got != "corr-1" {
-		t.Fatalf("correlation=%q", got)
-	}
-
+	assert.Equal(t, "ddgen-svc", canonical["service"])
+	assert.Equal(t, "ddgen synthetic log event", canonical["message"])
+	assert.Equal(t, "corr-1", canonical["correlation_id"])
 }
 
 func TestEvaluatePolicyLogsSemanticMatch(t *testing.T) {
@@ -44,9 +35,7 @@ func TestEvaluatePolicyLogsSemanticMatch(t *testing.T) {
 		"[0].message": `{"message":"ddgen synthetic log event","service":"ddgen-svc"}`,
 	}
 	mapping, _, err := loadFieldMapping()
-	if err != nil {
-		t.Fatalf("loadFieldMapping: %v", err)
-	}
+	require.NoError(t, err)
 	exporter = mapping.Map(SignalLogs, exporter)
 
 	policy := Policy{
@@ -62,16 +51,10 @@ func TestEvaluatePolicyLogsSemanticMatch(t *testing.T) {
 	}
 
 	checks, passed := evaluatePolicy("logs", receiver, exporter, policy)
-	if !passed {
-		t.Fatalf("expected policy to pass; checks=%+v", checks)
-	}
-	if len(checks) != 3 {
-		t.Fatalf("expected 3 checks, got %d", len(checks))
-	}
+	require.True(t, passed, "expected policy to pass; checks=%+v", checks)
+	require.Len(t, checks, 3)
 	for _, check := range checks {
-		if !check.Passed {
-			t.Fatalf("expected check %q to pass, got %+v", check.Attribute, check)
-		}
+		assert.True(t, check.Passed, "expected check %q to pass, got %+v", check.Attribute, check)
 	}
 }
 
@@ -86,9 +69,7 @@ func TestEvaluatePolicyLogsPresenceOnlyTimestamp(t *testing.T) {
 		"[0].timestamp": "1773343956000",
 	}
 	mapping, _, err := loadFieldMapping()
-	if err != nil {
-		t.Fatalf("loadFieldMapping: %v", err)
-	}
+	require.NoError(t, err)
 	exporter = mapping.Map(SignalLogs, exporter)
 
 	policy := Policy{
@@ -103,20 +84,16 @@ func TestEvaluatePolicyLogsPresenceOnlyTimestamp(t *testing.T) {
 	}
 
 	checks, passed := evaluatePolicy(SignalLogs, receiver, exporter, policy)
-	if !passed {
-		t.Fatalf("expected policy to pass; checks=%+v", checks)
-	}
-	if len(checks) != 2 {
-		t.Fatalf("expected 2 checks, got %d", len(checks))
-	}
+	require.True(t, passed, "expected policy to pass; checks=%+v", checks)
+	require.Len(t, checks, 2)
 	for _, check := range checks {
-		if !check.Passed {
-			t.Fatalf("expected check %q to pass, got %+v", check.Attribute, check)
-		}
+		assert.True(t, check.Passed, "expected check %q to pass, got %+v", check.Attribute, check)
 	}
 }
 
 func TestRequiredAttributesYAMLSupportsStringAndObject(t *testing.T) {
+	t.Parallel()
+
 	body := []byte(`
 signals:
   logs:
@@ -126,17 +103,11 @@ signals:
         compare: presence_only
 `)
 	var policy Policy
-	if err := yaml.Unmarshal(body, &policy); err != nil {
-		t.Fatalf("yaml unmarshal: %v", err)
-	}
+	require.NoError(t, yaml.Unmarshal(body, &policy))
 	logs := policy.Signals[SignalLogs]
-	if len(logs.RequiredAttributes) != 2 {
-		t.Fatalf("expected 2 required attributes, got %d", len(logs.RequiredAttributes))
-	}
-	if logs.RequiredAttributes[0].Name != "message" || logs.RequiredAttributes[0].compareMode() != "value" {
-		t.Fatalf("unexpected first attribute: %+v", logs.RequiredAttributes[0])
-	}
-	if logs.RequiredAttributes[1].Name != "timestamp" || logs.RequiredAttributes[1].compareMode() != "presence_only" {
-		t.Fatalf("unexpected second attribute: %+v", logs.RequiredAttributes[1])
-	}
+	require.Len(t, logs.RequiredAttributes, 2)
+	assert.Equal(t, "message", logs.RequiredAttributes[0].Name)
+	assert.Equal(t, "value", logs.RequiredAttributes[0].compareMode())
+	assert.Equal(t, "timestamp", logs.RequiredAttributes[1].Name)
+	assert.Equal(t, "presence_only", logs.RequiredAttributes[1].compareMode())
 }
