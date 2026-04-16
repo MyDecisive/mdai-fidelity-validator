@@ -8,7 +8,7 @@
 - Captures raw Datadog receiver-side requests on `:8126` and raw exporter-side requests on `:18081`.
 - Decodes JSON, gzipped JSON, and MessagePack request bodies so it can inspect raw Datadog-style payloads from a receiver proxy and a Datadog exporter.
 - Flattens each decoded payload into `attribute.path -> value` form so every incoming field is explicitly denoted in the response.
-- Correlates payload pairs using `X-Correlation-ID` when present, otherwise preferring `correlation_id` and `fidelity.correlation_id` across nested Datadog-style paths before falling back to a derived fingerprint.
+- Correlates payload pairs using `X-Correlation-ID` when present, otherwise preferring `correlation_id` across nested Datadog-style paths before falling back to a derived fingerprint.
 - Compares all flattened attributes and exports Prometheus metrics for both per-attribute and per-signal pass/fail results.
 
 ## Prometheus metrics
@@ -165,7 +165,7 @@ curl -sS localhost:8080/results/demo-1 | jq
 
 ## Important limitation
 
-This validator is now shaped around raw Datadog payload capture on both sides of a receiver/exporter boundary, but it still compares normalized attribute/value presence after decoding rather than byte-for-byte equivalence. For reliable pairing across ingress and egress observations, inject a stable identifier such as `correlation_id` or `fidelity.correlation_id` before export.
+This validator is now shaped around raw Datadog payload capture on both sides of a receiver/exporter boundary, but it still compares normalized attribute/value presence after decoding rather than byte-for-byte equivalence. For reliable pairing across ingress and egress observations, inject a stable identifier such as `correlation_id` before export.
 
 Policy-based fidelity is driven by the file set via `MDAI_FIDELITY_RULES_PATH` (example: [internal/validator/fidelity-policy.yaml](/Users/justin/work/mdai-fidelity-validator/internal/validator/fidelity-policy.yaml)). `passed` in comparison results and `mdai_fidelity_required_*` Prometheus metrics are based on those required attributes. `full_payload_passed` remains available for strict flattened payload debugging.
 

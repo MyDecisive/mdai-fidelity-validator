@@ -136,7 +136,7 @@ func TestBuildRequestWithoutCorrelationID(t *testing.T) {
 	tags := entry["tags"].([]any)
 	for _, tag := range tags {
 		tagValue := tag.(string)
-		if strings.HasPrefix(tagValue, "correlation_id:") || strings.HasPrefix(tagValue, "fidelity.correlation_id:") {
+		if strings.HasPrefix(tagValue, "correlation_id:") {
 			t.Fatalf("expected no correlation tags, got %#v", tags)
 		}
 	}
@@ -162,14 +162,14 @@ func TestBuildLogsWithoutCorrelationID(t *testing.T) {
 	if _, ok := payload["correlation_id"]; ok {
 		t.Fatalf("did not expect correlation_id in payload: %#v", payload)
 	}
-	if tags, ok := payload["ddtags"].(string); !ok || strings.Contains(tags, "correlation_id:") || strings.Contains(tags, "fidelity.correlation_id:") {
+	if tags, ok := payload["ddtags"].(string); !ok || strings.Contains(tags, "correlation_id:") {
 		t.Fatalf("did not expect correlation tags in ddtags=%q", payload["ddtags"])
 	}
 	attrs, ok := payload["attributes"].(map[string]any)
 	if !ok {
 		t.Fatalf("expected attributes map, got %#v", payload["attributes"])
 	}
-	if _, ok := attrs["fidelity.correlation_id"]; ok {
-		t.Fatalf("did not expect fidelity.correlation_id in attributes: %#v", attrs)
+	if len(attrs) != 1 || attrs["env"] != "dev" {
+		t.Fatalf("unexpected attributes map: %#v", attrs)
 	}
 }

@@ -90,7 +90,7 @@ func (t datadogRawTranslator) Decode(signal Signal, path, contentEncoding, conte
 	}
 	return DecodedPayload{
 		Signal:        canonicalSignal,
-		CorrelationID: firstNonEmpty(fields["correlation_id"], fields["fidelity_correlation_id"]),
+		CorrelationID: fields["correlation_id"],
 		Attributes:    fields,
 		Format:        format,
 		DecodeError:   decodeError,
@@ -996,7 +996,7 @@ func stripCorrelationFromDDTags(tags string) string {
 			continue
 		}
 		key := strings.TrimSpace(kv[0])
-		if key == "correlation_id" || key == "fidelity.correlation_id" {
+		if key == "correlation_id" {
 			continue
 		}
 		filtered = append(filtered, trimmed)
@@ -1015,7 +1015,6 @@ func stripCorrelationFromMessageJSON(message string) string {
 		return message
 	}
 	delete(payload, "correlation_id")
-	delete(payload, "fidelity.correlation_id")
 
 	normalized, err := json.Marshal(payload)
 	if err != nil {
@@ -1466,7 +1465,7 @@ func resolveCorrelationIDFromDecoded(signal Signal, translatorCorrelationID stri
 }
 
 func resolveCorrelationID(signal Signal, fields map[string]string, headers http.Header, body []byte) correlationResolution {
-	if headerKey, headerValue := firstHeaderValue(headers, "X-Correlation-ID", "X-Fidelity-ID", "X-Request-ID"); headerValue != "" {
+	if headerKey, headerValue := firstHeaderValue(headers, "X-Correlation-ID", "X-Request-ID"); headerValue != "" {
 		return correlationResolution{
 			CorrelationID: string(signal) + ":" + headerValue,
 			Strategy:      "header",
@@ -1704,8 +1703,6 @@ func normalizeMsgpackValue(value any) any {
 func correlationCandidates(fields map[string]string) []string {
 	exact := []string{
 		"correlation_id",
-		"fidelity_correlation_id",
-		"fidelity.correlation_id",
 		"trace_id",
 	}
 
@@ -1737,7 +1734,6 @@ func correlationCandidates(fields map[string]string) []string {
 		switch {
 		case strings.HasSuffix(lower, ".correlation_id"),
 			strings.Contains(lower, ".correlation_id."),
-			strings.HasSuffix(lower, ".fidelity.correlation_id"),
 			strings.Contains(lower, "correlationid"),
 			strings.HasSuffix(lower, ".ddtags"),
 			lower == "ddtags",
@@ -1771,8 +1767,6 @@ func parseCorrelationTag(tag string) string {
 	switch {
 	case strings.HasPrefix(tag, "correlation_id:"):
 		return strings.TrimPrefix(tag, "correlation_id:")
-	case strings.HasPrefix(tag, "fidelity.correlation_id:"):
-		return strings.TrimPrefix(tag, "fidelity.correlation_id:")
 	default:
 		return ""
 	}
@@ -1821,7 +1815,6 @@ func selectedHeaders(header http.Header) map[string]string {
 		"Datadog-Meta-Lang",
 		"Datadog-Meta-Lang-Version",
 		"X-Correlation-ID",
-		"X-Fidelity-ID",
 		"X-Fidelity-Pair",
 		"X-Request-ID",
 		"Host",

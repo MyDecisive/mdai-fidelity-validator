@@ -29,13 +29,6 @@ signals:
       - "[0].message|json:correlation_id"
       - "[0].ddtags|tag:correlation_id"
       - "ddtags|tag:correlation_id"
-    fidelity_correlation_id:
-      - fidelity_correlation_id
-      - "fidelity.correlation_id"
-      - "[0].message|json:fidelity_correlation_id"
-      - "[0].message|json:fidelity.correlation_id"
-      - "[0].ddtags|tag:fidelity_correlation_id"
-      - "ddtags|tag:fidelity_correlation_id"
   traces:
     trace_id:
       - trace_id
@@ -57,9 +50,6 @@ signals:
     correlation_id:
       - correlation_id
       - "contains:.tags[|tag:correlation_id"
-    fidelity_correlation_id:
-      - fidelity_correlation_id
-      - "contains:.tags[|tag:fidelity_correlation_id"
     metric_name:
       - metric_name
       - "suffix:.metric"

@@ -294,16 +294,5 @@ func lookupRequiredAttribute(attribute string, fields map[string]string) (string
 	if value, ok := fields[attribute]; ok {
 		return value, true
 	}
-	switch attribute {
-	case "fidelity_correlation_id":
-		if value, ok := fields["fidelity.correlation_id"]; ok {
-			return value, true
-		}
-	case "fidelity.correlation_id":
-		if value, ok := fields["fidelity_correlation_id"]; ok {
-			return value, true
-		}
-	default:
-	}
 	return "", false
 }

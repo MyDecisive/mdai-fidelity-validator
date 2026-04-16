@@ -153,19 +153,5 @@ func applyTagOp(value, key string) (string, bool) {
 			return tagValue, true
 		}
 	}
-	if key == "fidelity_correlation_id" {
-		for part := range strings.SplitSeq(value, ",") {
-			tagKey, tagValue, ok := parseTagKV(part)
-			if !ok {
-				continue
-			}
-			if tagKey == "fidelity.correlation_id" {
-				if strings.TrimSpace(tagValue) == "" {
-					return "", false
-				}
-				return tagValue, true
-			}
-		}
-	}
 	return "", false
 }

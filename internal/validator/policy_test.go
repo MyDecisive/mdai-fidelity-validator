@@ -9,7 +9,7 @@ import (
 func TestCanonicalizeDatadogFieldsLogs(t *testing.T) {
 	setDefaultFieldMappingPath(t)
 	fields := map[string]string{
-		"[0].ddtags":  "env:dev,correlation_id:corr-1,fidelity.correlation_id:corr-1,otel_source:datadog_exporter",
+		"[0].ddtags":  "env:dev,correlation_id:corr-1,otel_source:datadog_exporter",
 		"[0].message": `{"ddsource":"mdai-fidelity-validator","hostname":"localhost","message":"ddgen synthetic log event","service":"ddgen-svc","status":"info","timestamp":1773343955346}`,
 	}
 	mapping, _, err := loadFieldMapping()
@@ -30,21 +30,17 @@ func TestCanonicalizeDatadogFieldsLogs(t *testing.T) {
 		t.Fatalf("correlation=%q", got)
 	}
 
-	if got := canonical["fidelity_correlation_id"]; got != "corr-1" {
-		t.Fatalf("fidelity=%q", got)
-	}
 }
 
 func TestEvaluatePolicyLogsSemanticMatch(t *testing.T) {
 	setDefaultFieldMappingPath(t)
 	receiver := map[string]string{
-		"message":                 "ddgen synthetic log event",
-		"service":                 "ddgen-svc",
-		"correlation_id":          "corr-1",
-		"fidelity.correlation_id": "corr-1",
+		"message":        "ddgen synthetic log event",
+		"service":        "ddgen-svc",
+		"correlation_id": "corr-1",
 	}
 	exporter := map[string]string{
-		"[0].ddtags":  "env:dev,correlation_id:corr-1,fidelity.correlation_id:corr-1,otel_source:datadog_exporter",
+		"[0].ddtags":  "env:dev,correlation_id:corr-1,otel_source:datadog_exporter",
 		"[0].message": `{"message":"ddgen synthetic log event","service":"ddgen-svc"}`,
 	}
 	mapping, _, err := loadFieldMapping()
@@ -59,7 +55,6 @@ func TestEvaluatePolicyLogsSemanticMatch(t *testing.T) {
 				RequiredAttributes: []RequiredAttributePolicy{
 					{Name: "message"},
 					{Name: "correlation_id"},
-					{Name: "fidelity_correlation_id"},
 					{Name: "service"},
 				},
 			},
@@ -70,8 +65,8 @@ func TestEvaluatePolicyLogsSemanticMatch(t *testing.T) {
 	if !passed {
 		t.Fatalf("expected policy to pass; checks=%+v", checks)
 	}
-	if len(checks) != 4 {
-		t.Fatalf("expected 4 checks, got %d", len(checks))
+	if len(checks) != 3 {
+		t.Fatalf("expected 3 checks, got %d", len(checks))
 	}
 	for _, check := range checks {
 		if !check.Passed {

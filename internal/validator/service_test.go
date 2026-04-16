@@ -277,7 +277,6 @@ func TestCorrelationCandidatesPreferCorrelationIDPaths(t *testing.T) {
 	fields := map[string]string{
 		"spans[0].meta.correlation_id":  "dd-span-1",
 		"resource.correlation_id":       "resource-1",
-		"fidelity.correlation_id":       "fidelity-1",
 		"resource.attributes.trace_id":  "trace-1",
 		"series[0].metric":              "metric-name",
 		"logs[0].attributes.service":    "checkout",
@@ -289,7 +288,7 @@ func TestCorrelationCandidatesPreferCorrelationIDPaths(t *testing.T) {
 	if len(candidates) == 0 {
 		t.Fatal("expected non-empty candidates")
 	}
-	if candidates[0] != "fidelity.correlation_id" && candidates[0] != "resource.correlation_id" && candidates[0] != "correlation_id" {
+	if candidates[0] != "resource.correlation_id" && candidates[0] != "correlation_id" {
 		t.Fatalf("expected correlation_id path to be preferred, got %q", candidates[0])
 	}
 }
@@ -334,7 +333,6 @@ func TestSelectedHeaders(t *testing.T) {
 	header := http.Header{}
 	header.Set("Content-Type", "application/msgpack")
 	header.Set("Dd-Api-Key", "secret")
-	header.Set("X-Fidelity-Id", "fid-1")
 	header.Set("X-Request-ID", "req-1")
 	header.Set("X-Unused", "ignored")
 
@@ -344,9 +342,6 @@ func TestSelectedHeaders(t *testing.T) {
 	}
 	if got["DD-API-KEY"] != "secret" {
 		t.Fatalf("unexpected dd api key: %#v", got)
-	}
-	if got["X-Fidelity-ID"] != "fid-1" {
-		t.Fatalf("unexpected x-fidelity-id: %#v", got)
 	}
 	if got["X-Request-ID"] != "req-1" {
 		t.Fatalf("unexpected x-request-id: %#v", got)
@@ -462,15 +457,6 @@ func TestResolveCorrelationIDFromHeaderFallbacks(t *testing.T) {
 	fields := map[string]string{}
 	body := []byte(`{"message":"hello"}`)
 
-	t.Run("x-fidelity-id", func(t *testing.T) {
-		headers := http.Header{}
-		headers.Set("X-Fidelity-Id", "fid-123")
-		got := resolveCorrelationID(SignalLogs, fields, headers, body)
-		if got.CorrelationID != "logs:fid-123" || got.Strategy != "header" || got.Field != "X-Fidelity-ID" {
-			t.Fatalf("unexpected decision: %+v", got)
-		}
-	})
-
 	t.Run("x-request-id", func(t *testing.T) {
 		headers := http.Header{}
 		headers.Set("X-Request-ID", "req-123")
@@ -509,7 +495,7 @@ func TestDeriveCorrelationFromMetricTagsBeforeMetricName(t *testing.T) {
 
 func TestDeriveCorrelationFromLogDDTags(t *testing.T) {
 	fields := map[string]string{
-		"[0].ddtags": "env:dev,correlation_id:corr-log-1,fidelity.correlation_id:corr-log-1",
+		"[0].ddtags": "env:dev,correlation_id:corr-log-1",
 	}
 
 	got := deriveCorrelationFromFields("logs", fields)
@@ -556,7 +542,7 @@ func TestComparePairStripsCorrelationFromLogDDTags(t *testing.T) {
 		correlation: "logs:corr-1",
 		receivedAt:  time.Now(),
 		flattened: map[string]string{
-			"ddtags": "env:dev,correlation_id:corr-a,fidelity.correlation_id:corr-a,otel_source:datadog_exporter",
+			"ddtags": "env:dev,correlation_id:corr-a,otel_source:datadog_exporter",
 		},
 	}
 	exporter := &observedPayload{
@@ -565,7 +551,7 @@ func TestComparePairStripsCorrelationFromLogDDTags(t *testing.T) {
 		correlation: "logs:corr-1",
 		receivedAt:  time.Now(),
 		flattened: map[string]string{
-			"[0].ddtags": "env:dev,correlation_id:corr-b,fidelity.correlation_id:corr-b,otel_source:datadog_exporter",
+			"[0].ddtags": "env:dev,correlation_id:corr-b,otel_source:datadog_exporter",
 		},
 	}
 

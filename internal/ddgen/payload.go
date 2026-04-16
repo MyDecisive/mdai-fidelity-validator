@@ -3,14 +3,13 @@ package ddgen
 import (
 	"bytes"
 	"compress/gzip"
-	"crypto/rand"
-	"encoding/binary"
+	crand "crypto/rand"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
-	"math/rand/v2"
+	randv2 "math/rand/v2"
 	"strings"
 	"time"
 
@@ -199,9 +198,9 @@ func buildTracePayload(service, env, host, correlationID string) any {
 	now := time.Now()
 	start := now.Add(-250 * time.Millisecond).UnixNano()
 	duration := int64(250 * time.Millisecond)
-	traceID := rand.Uint64() & 0x7fffffffffffffff
-	parentSpanID := rand.Uint64() & 0x7fffffffffffffff
-	childSpanID := rand.Uint64() & 0x7fffffffffffffff
+	traceID := randv2.Uint64() & 0x7fffffffffffffff
+	parentSpanID := randv2.Uint64() & 0x7fffffffffffffff
+	childSpanID := randv2.Uint64() & 0x7fffffffffffffff
 
 	payload := [][]map[string]any{
 		{
@@ -252,7 +251,7 @@ func buildMetricsPayload(service, env, host, correlationID string) any {
 		"env:" + env,
 	}
 	if correlationID != "" {
-		tags = append(tags, "correlation_id:"+correlationID, "fidelity.correlation_id:"+correlationID)
+		tags = append(tags, "correlation_id:"+correlationID)
 	}
 	return map[string]any{
 		"series": []map[string]any{
@@ -281,11 +280,8 @@ func buildLogsPayload(service, env, host, correlationID string) any {
 		},
 	}
 	if correlationID != "" {
-		payload["ddtags"] = "env:" + env + ",correlation_id:" + correlationID + ",fidelity.correlation_id:" + correlationID
+		payload["ddtags"] = "env:" + env + ",correlation_id:" + correlationID
 		payload["correlation_id"] = correlationID
-		if attrs, ok := payload["attributes"].(map[string]any); ok {
-			attrs["fidelity.correlation_id"] = correlationID
-		}
 	}
 	return payload
 }
@@ -298,7 +294,6 @@ func addTraceCorrelation(trace [][]map[string]any, correlationID string) {
 				continue
 			}
 			meta["correlation_id"] = correlationID
-			meta["fidelity.correlation_id"] = correlationID
 		}
 	}
 }
@@ -320,14 +315,14 @@ func randomHex(n int) string {
 		return ""
 	}
 	buf := make([]byte, n)
-	if _, err := rand.Read(buf); err != nil {
+	if _, err := crand.Read(buf); err != nil {
 		panic(err)
 	}
 	return hex.EncodeToString(buf)
 }
 
 func randomUint63() int64 {
-	return int64(rand.Uint64() & 0x7fffffffffffffff)
+	return int64(randv2.Uint64() & 0x7fffffffffffffff)
 }
 
 func mutatePayloadForDrop(signal Signal, payload any, probability float64) {
@@ -400,7 +395,7 @@ func dropMapKeys(values map[string]any, probability float64, protected map[strin
 		if _, ok := protected[key]; ok {
 			continue
 		}
-		if rand.Float64() < probability {
+		if randv2.Float64() < probability {
 			delete(values, key)
 		}
 	}
@@ -409,11 +404,11 @@ func dropMapKeys(values map[string]any, probability float64, protected map[strin
 func dropTags(tags []string, probability float64) []string {
 	out := make([]string, 0, len(tags))
 	for _, tag := range tags {
-		if strings.HasPrefix(tag, "correlation_id:") || strings.HasPrefix(tag, "fidelity.correlation_id:") {
+		if strings.HasPrefix(tag, "correlation_id:") {
 			out = append(out, tag)
 			continue
 		}
-		if rand.Float64() < probability {
+		if randv2.Float64() < probability {
 			continue
 		}
 		out = append(out, tag)
@@ -423,7 +418,6 @@ func dropTags(tags []string, probability float64) []string {
 
 func protectedCorrelationKeys() map[string]struct{} {
 	return map[string]struct{}{
-		"correlation_id":          {},
-		"fidelity.correlation_id": {},
+		"correlation_id": {},
 	}
 }

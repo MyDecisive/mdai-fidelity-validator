@@ -18,7 +18,6 @@ func TestDecodeBodyDatadogSeriesProtoV3(t *testing.T) {
 			"service:checkout",
 			"env:prod",
 			"correlation_id:corr-123",
-			"fidelity.correlation_id:corr-123",
 		},
 	)
 
@@ -66,7 +65,6 @@ func TestDatadogFieldMappingExtractsCorrelationFromSeriesProtoV3(t *testing.T) {
 			"service:checkout",
 			"env:prod",
 			"correlation_id:corr-123",
-			"fidelity.correlation_id:corr-123",
 		},
 	))
 
@@ -86,9 +84,6 @@ func TestDatadogFieldMappingExtractsCorrelationFromSeriesProtoV3(t *testing.T) {
 	fields := mapping.MapForPath(SignalMetrics, "/exporter/datadog/api/v2/series", flattenValueMap(payload))
 	if got := fields["correlation_id"]; got != "corr-123" {
 		t.Fatalf("correlation_id = %q", got)
-	}
-	if got := fields["fidelity_correlation_id"]; got != "corr-123" {
-		t.Fatalf("fidelity_correlation_id = %q", got)
 	}
 	if got := fields["metric_name"]; got != "app.request.count" {
 		t.Fatalf("metric_name = %q", got)

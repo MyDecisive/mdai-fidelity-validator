@@ -41,7 +41,7 @@ func run(logger *zap.Logger) error {
 		count               = flag.Int("count", 1, "Number of requests to send")
 		interval            = flag.Duration("interval", 0, "Delay between requests")
 		useGzip             = flag.Bool("gzip", false, "Compress payloads with gzip")
-		omitCorrelationID   = flag.Bool("omit-correlation-id", false, "Do not include correlation_id/fidelity.correlation_id in payloads or X-Correlation-ID header")
+		omitCorrelationID   = flag.Bool("omit-correlation-id", false, "Do not include correlation_id in payloads or X-Correlation-ID header")
 		service             = flag.String("service", "", "Service name override")
 		env                 = flag.String("env", "dev", "Environment tag")
 		host                = flag.String("host", "localhost", "Hostname value")

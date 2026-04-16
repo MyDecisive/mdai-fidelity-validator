@@ -22,7 +22,7 @@ func TestFieldMappingMapLogs(t *testing.T) {
 		t.Fatalf("loadFieldMapping: %v", err)
 	}
 	fields := map[string]string{
-		"[0].ddtags":  "env:dev,correlation_id:corr-1,fidelity.correlation_id:corr-2",
+		"[0].ddtags":  "env:dev,correlation_id:corr-1",
 		"[0].message": `{"message":"event","service":"svc-a","status":"info","timestamp":1773343955346}`,
 	}
 
@@ -35,9 +35,6 @@ func TestFieldMappingMapLogs(t *testing.T) {
 	}
 	if got := mapped["correlation_id"]; got != "corr-1" {
 		t.Fatalf("correlation_id=%q", got)
-	}
-	if got := mapped["fidelity_correlation_id"]; got != "corr-2" {
-		t.Fatalf("fidelity_correlation_id=%q", got)
 	}
 }
 
