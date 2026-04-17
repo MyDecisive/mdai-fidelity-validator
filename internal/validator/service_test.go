@@ -93,8 +93,8 @@ func requireMetricHasConnectionLabel(t *testing.T, registry *prometheus.Registry
 		if family.GetName() != metricName {
 			continue
 		}
-		require.NotEmpty(t, family.Metric, "metric %s had no series", metricName)
-		for _, metric := range family.Metric {
+		require.NotEmpty(t, family.GetMetric(), "metric %s had no series", metricName)
+		for _, metric := range family.GetMetric() {
 			assert.True(t, hasLabel(metric, "mdai_connection", connection), "metric %s missing mdai_connection=%q label: %+v", metricName, connection, metric.GetLabel())
 		}
 		return
@@ -267,8 +267,8 @@ func TestInferSignalFromDatadogPath(t *testing.T) {
 		"/api/v1/distribution_points": SignalMetrics,
 	}
 
-	for path, want := range cases {
-		assert.Equal(t, want, inferSignalFromDatadogPath(path), "path=%s", path)
+	for requestPath, want := range cases {
+		assert.Equal(t, want, inferSignalFromDatadogPath(requestPath), "path=%s", requestPath)
 	}
 }
 
@@ -328,13 +328,13 @@ func TestRecordMetricsUsesConnectionLabel(t *testing.T) {
 		},
 	})
 
-	assert.Equal(t, float64(1), counterValue(t, svc.attributeEval.WithLabelValues("shadow-a", "traces", "trace_id", "pass")))
-	assert.Equal(t, float64(1), counterValue(t, svc.attributeEval.WithLabelValues("shadow-a", "traces", "span_id", "fail")))
-	assert.Equal(t, float64(1), counterValue(t, svc.attributeEval.WithLabelValues("shadow-a", "traces", "service.name", "fail")))
-	assert.Equal(t, float64(1), counterValue(t, svc.signalEval.WithLabelValues("shadow-a", "traces", "fail")))
-	assert.Equal(t, float64(1), counterValue(t, svc.requiredSig.WithLabelValues("shadow-a", "traces", "pass")))
-	assert.Equal(t, float64(1), counterValue(t, svc.requiredEval.WithLabelValues("shadow-a", "traces", "trace_id", "pass")))
-	assert.Equal(t, float64(1), counterValue(t, svc.requiredEval.WithLabelValues("shadow-a", "traces", "service.name", "fail")))
+	assert.InDelta(t, float64(1), counterValue(t, svc.attributeEval.WithLabelValues("shadow-a", "traces", "trace_id", "pass")), 0.000001)
+	assert.InDelta(t, float64(1), counterValue(t, svc.attributeEval.WithLabelValues("shadow-a", "traces", "span_id", "fail")), 0.000001)
+	assert.InDelta(t, float64(1), counterValue(t, svc.attributeEval.WithLabelValues("shadow-a", "traces", "service.name", "fail")), 0.000001)
+	assert.InDelta(t, float64(1), counterValue(t, svc.signalEval.WithLabelValues("shadow-a", "traces", "fail")), 0.000001)
+	assert.InDelta(t, float64(1), counterValue(t, svc.requiredSig.WithLabelValues("shadow-a", "traces", "pass")), 0.000001)
+	assert.InDelta(t, float64(1), counterValue(t, svc.requiredEval.WithLabelValues("shadow-a", "traces", "trace_id", "pass")), 0.000001)
+	assert.InDelta(t, float64(1), counterValue(t, svc.requiredEval.WithLabelValues("shadow-a", "traces", "service.name", "fail")), 0.000001)
 
 	requireMetricHasConnectionLabel(t, registry, "mdai_fidelity_attribute_checks_total", "shadow-a")
 	requireMetricHasConnectionLabel(t, registry, "mdai_fidelity_signal_checks_total", "shadow-a")
@@ -376,7 +376,7 @@ func TestCaptureRequestUsesConnectionLabelForReceivedMetric(t *testing.T) {
 	require.NotNil(t, observed)
 	assert.Nil(t, result)
 	assert.False(t, matched)
-	assert.Equal(t, float64(1), counterValue(t, svc.receivedTotal.WithLabelValues("shadow-b", "receiver", "traces")))
+	assert.InDelta(t, float64(1), counterValue(t, svc.receivedTotal.WithLabelValues("shadow-b", "receiver", "traces")), 0.000001)
 
 	requireMetricHasConnectionLabel(t, registry, "mdai_fidelity_payloads_received_total", "shadow-b")
 }
@@ -387,7 +387,7 @@ func TestAdjustPendingTotalUsesConnectionLabel(t *testing.T) {
 	svc, registry := newMetricsTestService("shadow-c")
 	svc.adjustPendingTotal(2)
 
-	assert.Equal(t, float64(2), gaugeValue(t, svc.pendingGauge.WithLabelValues("shadow-c")))
+	assert.InDelta(t, float64(2), gaugeValue(t, svc.pendingGauge.WithLabelValues("shadow-c")), 0.000001)
 
 	requireMetricHasConnectionLabel(t, registry, "mdai_fidelity_pending_payloads", "shadow-c")
 }
@@ -422,7 +422,7 @@ func TestObserveDropsExpiredPendingWithoutFullShardGC(t *testing.T) {
 	assert.False(t, matched)
 	assert.Nil(t, result)
 	assert.Equal(t, int64(1), svc.pendingTotal.Load())
-	assert.Equal(t, float64(1), gaugeValue(t, svc.pendingGauge.WithLabelValues("shadow-expired")))
+	assert.InDelta(t, float64(1), gaugeValue(t, svc.pendingGauge.WithLabelValues("shadow-expired")), 0.000001)
 }
 
 func TestGCExpiredShardStateRemovesExpiredPendingAndUpdatesGauge(t *testing.T) {
@@ -446,7 +446,7 @@ func TestGCExpiredShardStateRemovesExpiredPendingAndUpdatesGauge(t *testing.T) {
 
 	assert.Empty(t, sh.pending)
 	assert.Equal(t, int64(0), svc.pendingTotal.Load())
-	assert.Equal(t, float64(0), gaugeValue(t, svc.pendingGauge.WithLabelValues("shadow-gc")))
+	assert.InDelta(t, float64(0), gaugeValue(t, svc.pendingGauge.WithLabelValues("shadow-gc")), 0.000001)
 }
 
 func TestResolveCorrelationIDFromHeaderFallbacks(t *testing.T) {

@@ -230,8 +230,9 @@ func findKeysForAttribute(signal Signal, attribute string, fields map[string]str
 		return findLogKeysForAttribute(attribute, fields)
 	case SignalAPI, SignalValidate, SignalUnknown:
 		return nil
+	default:
+		return nil
 	}
-	return nil
 }
 
 func findTraceKeysForAttribute(attribute string, fields map[string]string) []string {

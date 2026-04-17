@@ -1,8 +1,9 @@
 package validator
 
 import (
-	"github.com/cespare/xxhash/v2"
 	"time"
+
+	"github.com/cespare/xxhash/v2"
 )
 
 func (s *Service) getShard(correlationID string) *shard {
@@ -19,10 +20,7 @@ func (s *Service) observe(payload *observedPayload) (*ComparisonResult, bool) {
 	s.rememberObserved(payload)
 
 	if existing, ok := sh.pending[payload.correlation]; ok {
-		if now.Sub(existing.receivedAt) > s.retention {
-			delete(sh.pending, payload.correlation)
-			s.adjustPendingTotal(-1)
-		} else {
+		if now.Sub(existing.receivedAt) <= s.retention {
 			if existing.source == payload.source {
 				sh.pending[payload.correlation] = payload
 				return nil, false
@@ -36,6 +34,9 @@ func (s *Service) observe(payload *observedPayload) (*ComparisonResult, bool) {
 			s.recordMetrics(result)
 			return &result, true
 		}
+
+		delete(sh.pending, payload.correlation)
+		s.adjustPendingTotal(-1)
 	}
 
 	sh.pending[payload.correlation] = payload

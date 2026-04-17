@@ -334,7 +334,7 @@ func (s *Service) AdminRoutes() http.Handler {
 	return mux
 }
 
-func (s *Service) MetricsRoutes() http.Handler {
+func (*Service) MetricsRoutes() http.Handler {
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", promhttp.Handler())
 	return mux

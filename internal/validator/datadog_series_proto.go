@@ -1,6 +1,7 @@
 package validator
 
 import (
+	"errors"
 	"fmt"
 	"math"
 	"strings"
@@ -36,7 +37,10 @@ func decodeDatadogSeriesProto(path string, body []byte) (any, error) {
 		return v2Payload, nil
 	}
 
-	return nil, fmt.Errorf("failed to decode Datadog series protobuf payload: v3=%v; v2=%v", v3Err, v2Err)
+	return nil, fmt.Errorf(
+		"failed to decode Datadog series protobuf payload: %w",
+		errors.Join(fmt.Errorf("v3: %w", v3Err), fmt.Errorf("v2: %w", v2Err)),
+	)
 }
 
 func decodeDatadogSeriesProtoV3(body []byte) (map[string]any, error) {
@@ -83,7 +87,7 @@ func decodeDatadogSeriesProtoV3(body []byte) (map[string]any, error) {
 	}
 
 	if len(metricDataRaw) == 0 {
-		return nil, fmt.Errorf("missing metricData field")
+		return nil, errors.New("missing metricData field")
 	}
 
 	payload, err := parseDatadogSeriesV3MetricData(metricDataRaw)
@@ -144,321 +148,15 @@ func parseDatadogSeriesV3Metadata(body []byte) (map[string]any, error) {
 }
 
 func parseDatadogSeriesV3MetricData(body []byte) (map[string]any, error) {
-	var (
-		dictNameStrRaw      []byte
-		dictTagStrRaw       []byte
-		dictTagsetsRaw      []int64
-		dictResourceStrRaw  []byte
-		dictResourceLenRaw  []int64
-		dictResourceTypeRaw []int64
-		dictResourceNameRaw []int64
-		dictSourceTypeRaw   []byte
-		dictOriginInfoRaw   []int64
-		dictUnitStrRaw      []byte
-		typesRaw            []uint64
-		nameRefsRaw         []int64
-		tagsetRefsRaw       []int64
-		resourcesRefsRaw    []int64
-		intervalsRaw        []uint64
-		numPointsRaw        []uint64
-		sourceTypeNameRefs  []int64
-		originInfoRefsRaw   []int64
-		unitRefsRaw         []int64
-		timestampsRaw       []int64
-		valsSint64Raw       []int64
-		valsFloat32Raw      []float64
-		valsFloat64Raw      []float64
-	)
-
-	for len(body) > 0 {
-		num, typ, n := protowire.ConsumeTag(body)
-		if n < 0 {
-			return nil, protowire.ParseError(n)
-		}
-		body = body[n:]
-
-		switch num {
-		case 1:
-			raw, next, err := consumeBytesField(typ, body)
-			if err != nil {
-				return nil, err
-			}
-			body = next
-			dictNameStrRaw = raw
-		case 2:
-			raw, next, err := consumeBytesField(typ, body)
-			if err != nil {
-				return nil, err
-			}
-			body = next
-			dictTagStrRaw = raw
-		case 3:
-			values, next, err := consumePackedSint64Field(typ, body)
-			if err != nil {
-				return nil, err
-			}
-			body = next
-			dictTagsetsRaw = append(dictTagsetsRaw, values...)
-		case 4:
-			raw, next, err := consumeBytesField(typ, body)
-			if err != nil {
-				return nil, err
-			}
-			body = next
-			dictResourceStrRaw = raw
-		case 5:
-			values, next, err := consumePackedInt64Field(typ, body)
-			if err != nil {
-				return nil, err
-			}
-			body = next
-			dictResourceLenRaw = append(dictResourceLenRaw, values...)
-		case 6:
-			values, next, err := consumePackedSint64Field(typ, body)
-			if err != nil {
-				return nil, err
-			}
-			body = next
-			dictResourceTypeRaw = append(dictResourceTypeRaw, values...)
-		case 7:
-			values, next, err := consumePackedSint64Field(typ, body)
-			if err != nil {
-				return nil, err
-			}
-			body = next
-			dictResourceNameRaw = append(dictResourceNameRaw, values...)
-		case 8:
-			raw, next, err := consumeBytesField(typ, body)
-			if err != nil {
-				return nil, err
-			}
-			body = next
-			dictSourceTypeRaw = raw
-		case 9:
-			values, next, err := consumePackedInt32Field(typ, body)
-			if err != nil {
-				return nil, err
-			}
-			body = next
-			dictOriginInfoRaw = append(dictOriginInfoRaw, values...)
-		case 10:
-			values, next, err := consumePackedUint64Field(typ, body)
-			if err != nil {
-				return nil, err
-			}
-			body = next
-			typesRaw = append(typesRaw, values...)
-		case 11:
-			values, next, err := consumePackedSint64Field(typ, body)
-			if err != nil {
-				return nil, err
-			}
-			body = next
-			nameRefsRaw = append(nameRefsRaw, values...)
-		case 12:
-			values, next, err := consumePackedSint64Field(typ, body)
-			if err != nil {
-				return nil, err
-			}
-			body = next
-			tagsetRefsRaw = append(tagsetRefsRaw, values...)
-		case 13:
-			values, next, err := consumePackedSint64Field(typ, body)
-			if err != nil {
-				return nil, err
-			}
-			body = next
-			resourcesRefsRaw = append(resourcesRefsRaw, values...)
-		case 14:
-			values, next, err := consumePackedUint64Field(typ, body)
-			if err != nil {
-				return nil, err
-			}
-			body = next
-			intervalsRaw = append(intervalsRaw, values...)
-		case 15:
-			values, next, err := consumePackedUint64Field(typ, body)
-			if err != nil {
-				return nil, err
-			}
-			body = next
-			numPointsRaw = append(numPointsRaw, values...)
-		case 16:
-			values, next, err := consumePackedSint64Field(typ, body)
-			if err != nil {
-				return nil, err
-			}
-			body = next
-			timestampsRaw = append(timestampsRaw, values...)
-		case 17:
-			values, next, err := consumePackedSint64Field(typ, body)
-			if err != nil {
-				return nil, err
-			}
-			body = next
-			valsSint64Raw = append(valsSint64Raw, values...)
-		case 18:
-			values, next, err := consumePackedFloat32Field(typ, body)
-			if err != nil {
-				return nil, err
-			}
-			body = next
-			valsFloat32Raw = append(valsFloat32Raw, values...)
-		case 19:
-			values, next, err := consumePackedFloat64Field(typ, body)
-			if err != nil {
-				return nil, err
-			}
-			body = next
-			valsFloat64Raw = append(valsFloat64Raw, values...)
-		case 23:
-			values, next, err := consumePackedSint64Field(typ, body)
-			if err != nil {
-				return nil, err
-			}
-			body = next
-			sourceTypeNameRefs = append(sourceTypeNameRefs, values...)
-		case 24:
-			values, next, err := consumePackedSint64Field(typ, body)
-			if err != nil {
-				return nil, err
-			}
-			body = next
-			originInfoRefsRaw = append(originInfoRefsRaw, values...)
-		case 25:
-			raw, next, err := consumeBytesField(typ, body)
-			if err != nil {
-				return nil, err
-			}
-			body = next
-			dictUnitStrRaw = raw
-		case 26:
-			values, next, err := consumePackedSint64Field(typ, body)
-			if err != nil {
-				return nil, err
-			}
-			body = next
-			unitRefsRaw = append(unitRefsRaw, values...)
-		default:
-			next, err := skipFieldValue(num, typ, body)
-			if err != nil {
-				return nil, err
-			}
-			body = next
-		}
-	}
-
-	names, err := parseDatadogStringTable(dictNameStrRaw)
+	raw, err := parseDatadogSeriesV3MetricDataRaw(body)
 	if err != nil {
-		return nil, fmt.Errorf("parse name dictionary: %w", err)
+		return nil, err
 	}
-	tagStrings, err := parseDatadogStringTable(dictTagStrRaw)
+	decoded, err := raw.decode()
 	if err != nil {
-		return nil, fmt.Errorf("parse tag dictionary: %w", err)
+		return nil, err
 	}
-	resourceStrings, err := parseDatadogStringTable(dictResourceStrRaw)
-	if err != nil {
-		return nil, fmt.Errorf("parse resource dictionary: %w", err)
-	}
-	sourceTypeNames, err := parseDatadogStringTable(dictSourceTypeRaw)
-	if err != nil {
-		return nil, fmt.Errorf("parse source type dictionary: %w", err)
-	}
-	unitStrings, err := parseDatadogStringTable(dictUnitStrRaw)
-	if err != nil {
-		return nil, fmt.Errorf("parse unit dictionary: %w", err)
-	}
-
-	tagSets, err := parseDatadogTagSets(dictTagsetsRaw, tagStrings)
-	if err != nil {
-		return nil, fmt.Errorf("parse tag sets: %w", err)
-	}
-	resourceSets, err := parseDatadogResourceSets(dictResourceLenRaw, dictResourceTypeRaw, dictResourceNameRaw, resourceStrings)
-	if err != nil {
-		return nil, fmt.Errorf("parse resource sets: %w", err)
-	}
-	originInfo := parseDatadogOriginInfo(dictOriginInfoRaw)
-
-	nameRefs := decodeDatadogDeltaRefs(nameRefsRaw)
-	tagsetRefs := decodeDatadogDeltaRefs(tagsetRefsRaw)
-	resourceRefs := decodeDatadogDeltaRefs(resourcesRefsRaw)
-	sourceRefs := decodeDatadogDeltaRefs(sourceTypeNameRefs)
-	originRefs := decodeDatadogDeltaRefs(originInfoRefsRaw)
-	unitRefs := decodeDatadogDeltaRefs(unitRefsRaw)
-	timestamps := decodeDatadogDeltaValues(timestampsRaw)
-
-	if len(typesRaw) == 0 {
-		return nil, fmt.Errorf("metric series payload had no series")
-	}
-
-	series := make([]any, 0, len(typesRaw))
-	timestampIndex := 0
-	sintIndex := 0
-	float32Index := 0
-	float64Index := 0
-
-	for i, typ := range typesRaw {
-		metricType := int(typ & 0x0f)
-		valueType := typ & 0xf0
-		if metricType == datadogMetricTypeSketch {
-			return nil, fmt.Errorf("sketch metrics are not supported in /series protobuf decoder")
-		}
-
-		row := map[string]any{}
-		if metric := datadogRefString(names, datadogRefAt(nameRefs, i)); metric != "" {
-			row["metric"] = metric
-		}
-		if tags := datadogRefStringSlice(tagSets, datadogRefAt(tagsetRefs, i)); len(tags) > 0 {
-			row["tags"] = stringsToAny(tags)
-		}
-		if resources := datadogRefResourceSlice(resourceSets, datadogRefAt(resourceRefs, i)); len(resources) > 0 {
-			row["resources"] = resources
-		}
-		if metricTypeName := datadogMetricTypeName(metricType); metricTypeName != "" {
-			row["type"] = metricTypeName
-		}
-		if interval := datadogUint64At(intervalsRaw, i); interval > 0 {
-			row["interval"] = float64(interval)
-		}
-		if sourceType := datadogRefString(sourceTypeNames, datadogRefAt(sourceRefs, i)); sourceType != "" {
-			row["source_type_name"] = sourceType
-		}
-		if unit := datadogRefString(unitStrings, datadogRefAt(unitRefs, i)); unit != "" {
-			row["unit"] = unit
-		}
-		if origin := datadogRefOrigin(originInfo, datadogRefAt(originRefs, i)); len(origin) > 0 {
-			row["metadata"] = origin
-		}
-
-		pointCount := int(datadogUint64At(numPointsRaw, i))
-		if pointCount < 0 || timestampIndex+pointCount > len(timestamps) {
-			return nil, fmt.Errorf("series[%d] point count exceeded timestamp payload", i)
-		}
-
-		points := make([]any, 0, pointCount)
-		for j := 0; j < pointCount; j++ {
-			value, nextSint, nextFloat32, nextFloat64, err := datadogConsumePointValue(valueType, sintIndex, float32Index, float64Index, valsSint64Raw, valsFloat32Raw, valsFloat64Raw)
-			if err != nil {
-				return nil, fmt.Errorf("series[%d] point[%d]: %w", i, j, err)
-			}
-			sintIndex = nextSint
-			float32Index = nextFloat32
-			float64Index = nextFloat64
-
-			points = append(points, []any{
-				float64(timestamps[timestampIndex]),
-				value,
-			})
-			timestampIndex++
-		}
-		if len(points) > 0 {
-			row["points"] = points
-		}
-
-		series = append(series, row)
-	}
-
-	return map[string]any{"series": series}, nil
+	return decoded.buildPayload()
 }
 
 func decodeDatadogSeriesProtoV2(body []byte) (map[string]any, error) {
@@ -493,19 +191,14 @@ func decodeDatadogSeriesProtoV2(body []byte) (map[string]any, error) {
 	}
 
 	if len(series) == 0 {
-		return nil, fmt.Errorf("metric payload had no series")
+		return nil, errors.New("metric payload had no series")
 	}
 	return map[string]any{"series": series}, nil
 }
 
 func parseDatadogSeriesProtoV2Series(body []byte) (map[string]any, error) {
 	row := map[string]any{}
-	var (
-		tags      []any
-		points    []any
-		resources []any
-		metadata  map[string]any
-	)
+	collector := &datadogSeriesV2Collector{}
 
 	for len(body) > 0 {
 		num, typ, n := protowire.ConsumeTag(body)
@@ -514,105 +207,454 @@ func parseDatadogSeriesProtoV2Series(body []byte) (map[string]any, error) {
 		}
 		body = body[n:]
 
-		switch num {
-		case 1:
-			raw, next, err := consumeBytesField(typ, body)
-			if err != nil {
-				return nil, err
-			}
-			body = next
-			resource, err := parseDatadogSeriesProtoV2Resource(raw)
-			if err != nil {
-				return nil, err
-			}
-			resources = append(resources, resource)
-		case 2:
-			value, next, err := consumeStringField(typ, body)
-			if err != nil {
-				return nil, err
-			}
-			body = next
-			row["metric"] = value
-		case 3:
-			value, next, err := consumeStringField(typ, body)
-			if err != nil {
-				return nil, err
-			}
-			body = next
-			tags = append(tags, value)
-		case 4:
-			raw, next, err := consumeBytesField(typ, body)
-			if err != nil {
-				return nil, err
-			}
-			body = next
-			point, err := parseDatadogSeriesProtoV2Point(raw)
-			if err != nil {
-				return nil, err
-			}
-			points = append(points, point)
-		case 5:
-			value, next, err := consumeVarintField(typ, body)
-			if err != nil {
-				return nil, err
-			}
-			body = next
-			if metricType := datadogMetricTypeName(int(value)); metricType != "" {
-				row["type"] = metricType
-			}
-		case 6:
-			value, next, err := consumeStringField(typ, body)
-			if err != nil {
-				return nil, err
-			}
-			body = next
-			row["unit"] = value
-		case 7:
-			value, next, err := consumeStringField(typ, body)
-			if err != nil {
-				return nil, err
-			}
-			body = next
-			row["source_type_name"] = value
-		case 8:
-			value, next, err := consumeVarintField(typ, body)
-			if err != nil {
-				return nil, err
-			}
-			body = next
-			row["interval"] = float64(value)
-		case 9:
-			raw, next, err := consumeBytesField(typ, body)
-			if err != nil {
-				return nil, err
-			}
-			body = next
-			metadata, err = parseDatadogSeriesProtoV2Metadata(raw)
-			if err != nil {
-				return nil, err
-			}
-		default:
-			next, err := skipFieldValue(num, typ, body)
-			if err != nil {
-				return nil, err
-			}
-			body = next
+		next, err := collector.consumeField(row, num, typ, body)
+		if err != nil {
+			return nil, err
 		}
+		body = next
 	}
 
-	if len(tags) > 0 {
-		row["tags"] = tags
+	collector.finalize(row)
+	return row, nil
+}
+
+type datadogSeriesV3Raw struct {
+	dictNameStrRaw      []byte
+	dictTagStrRaw       []byte
+	dictTagsetsRaw      []int64
+	dictResourceStrRaw  []byte
+	dictResourceLenRaw  []int64
+	dictResourceTypeRaw []int64
+	dictResourceNameRaw []int64
+	dictSourceTypeRaw   []byte
+	dictOriginInfoRaw   []int64
+	dictUnitStrRaw      []byte
+	typesRaw            []uint64
+	nameRefsRaw         []int64
+	tagsetRefsRaw       []int64
+	resourcesRefsRaw    []int64
+	intervalsRaw        []uint64
+	numPointsRaw        []uint64
+	sourceTypeNameRefs  []int64
+	originInfoRefsRaw   []int64
+	unitRefsRaw         []int64
+	timestampsRaw       []int64
+	valsSint64Raw       []int64
+	valsFloat32Raw      []float64
+	valsFloat64Raw      []float64
+}
+
+type datadogSeriesV3Decoded struct {
+	names           []string
+	tagSets         [][]string
+	resourceSets    []any
+	sourceTypeNames []string
+	originInfo      []map[string]any
+	unitStrings     []string
+	typesRaw        []uint64
+	nameRefs        []int
+	tagsetRefs      []int
+	resourceRefs    []int
+	intervalsRaw    []uint64
+	numPointsRaw    []uint64
+	sourceRefs      []int
+	originRefs      []int
+	unitRefs        []int
+	timestamps      []int64
+	valsSint64Raw   []int64
+	valsFloat32Raw  []float64
+	valsFloat64Raw  []float64
+}
+
+type datadogSeriesV3PointCursor struct {
+	timestampIndex int
+	sintIndex      int
+	float32Index   int
+	float64Index   int
+}
+
+type datadogSeriesV2Collector struct {
+	tags      []any
+	points    []any
+	resources []any
+	metadata  map[string]any
+}
+
+func parseDatadogSeriesV3MetricDataRaw(body []byte) (datadogSeriesV3Raw, error) {
+	raw := datadogSeriesV3Raw{}
+	for len(body) > 0 {
+		num, typ, n := protowire.ConsumeTag(body)
+		if n < 0 {
+			return datadogSeriesV3Raw{}, protowire.ParseError(n)
+		}
+		body = body[n:]
+
+		next, err := raw.consumeField(num, typ, body)
+		if err != nil {
+			return datadogSeriesV3Raw{}, err
+		}
+		body = next
+	}
+	return raw, nil
+}
+
+func (raw *datadogSeriesV3Raw) consumeField(num protowire.Number, typ protowire.Type, body []byte) ([]byte, error) {
+	switch num {
+	case 1:
+		return consumeV3Bytes(body, typ, &raw.dictNameStrRaw)
+	case 2:
+		return consumeV3Bytes(body, typ, &raw.dictTagStrRaw)
+	case 3:
+		return consumeV3PackedSint64(body, typ, &raw.dictTagsetsRaw)
+	case 4:
+		return consumeV3Bytes(body, typ, &raw.dictResourceStrRaw)
+	case 5:
+		return consumeV3PackedInt64(body, typ, &raw.dictResourceLenRaw)
+	case 6:
+		return consumeV3PackedSint64(body, typ, &raw.dictResourceTypeRaw)
+	case 7:
+		return consumeV3PackedSint64(body, typ, &raw.dictResourceNameRaw)
+	case 8:
+		return consumeV3Bytes(body, typ, &raw.dictSourceTypeRaw)
+	case 9:
+		return consumeV3PackedInt32(body, typ, &raw.dictOriginInfoRaw)
+	case 10:
+		return consumeV3PackedUint64(body, typ, &raw.typesRaw)
+	case 11:
+		return consumeV3PackedSint64(body, typ, &raw.nameRefsRaw)
+	case 12:
+		return consumeV3PackedSint64(body, typ, &raw.tagsetRefsRaw)
+	case 13:
+		return consumeV3PackedSint64(body, typ, &raw.resourcesRefsRaw)
+	case 14:
+		return consumeV3PackedUint64(body, typ, &raw.intervalsRaw)
+	case 15:
+		return consumeV3PackedUint64(body, typ, &raw.numPointsRaw)
+	case 16:
+		return consumeV3PackedSint64(body, typ, &raw.timestampsRaw)
+	case 17:
+		return consumeV3PackedSint64(body, typ, &raw.valsSint64Raw)
+	case 18:
+		return consumeV3PackedFloat32(body, typ, &raw.valsFloat32Raw)
+	case 19:
+		return consumeV3PackedFloat64(body, typ, &raw.valsFloat64Raw)
+	case 23:
+		return consumeV3PackedSint64(body, typ, &raw.sourceTypeNameRefs)
+	case 24:
+		return consumeV3PackedSint64(body, typ, &raw.originInfoRefsRaw)
+	case 25:
+		return consumeV3Bytes(body, typ, &raw.dictUnitStrRaw)
+	case 26:
+		return consumeV3PackedSint64(body, typ, &raw.unitRefsRaw)
+	default:
+		return skipFieldValue(num, typ, body)
+	}
+}
+
+func (raw *datadogSeriesV3Raw) decode() (datadogSeriesV3Decoded, error) {
+	names, err := parseDatadogStringTable(raw.dictNameStrRaw)
+	if err != nil {
+		return datadogSeriesV3Decoded{}, fmt.Errorf("parse name dictionary: %w", err)
+	}
+	tagStrings, err := parseDatadogStringTable(raw.dictTagStrRaw)
+	if err != nil {
+		return datadogSeriesV3Decoded{}, fmt.Errorf("parse tag dictionary: %w", err)
+	}
+	resourceStrings, err := parseDatadogStringTable(raw.dictResourceStrRaw)
+	if err != nil {
+		return datadogSeriesV3Decoded{}, fmt.Errorf("parse resource dictionary: %w", err)
+	}
+	sourceTypeNames, err := parseDatadogStringTable(raw.dictSourceTypeRaw)
+	if err != nil {
+		return datadogSeriesV3Decoded{}, fmt.Errorf("parse source type dictionary: %w", err)
+	}
+	unitStrings, err := parseDatadogStringTable(raw.dictUnitStrRaw)
+	if err != nil {
+		return datadogSeriesV3Decoded{}, fmt.Errorf("parse unit dictionary: %w", err)
+	}
+	tagSets, err := parseDatadogTagSets(raw.dictTagsetsRaw, tagStrings)
+	if err != nil {
+		return datadogSeriesV3Decoded{}, fmt.Errorf("parse tag sets: %w", err)
+	}
+	resourceSets, err := parseDatadogResourceSets(raw.dictResourceLenRaw, raw.dictResourceTypeRaw, raw.dictResourceNameRaw, resourceStrings)
+	if err != nil {
+		return datadogSeriesV3Decoded{}, fmt.Errorf("parse resource sets: %w", err)
+	}
+
+	return datadogSeriesV3Decoded{
+		names:           names,
+		tagSets:         tagSets,
+		resourceSets:    resourceSets,
+		sourceTypeNames: sourceTypeNames,
+		originInfo:      parseDatadogOriginInfo(raw.dictOriginInfoRaw),
+		unitStrings:     unitStrings,
+		typesRaw:        raw.typesRaw,
+		nameRefs:        decodeDatadogDeltaRefs(raw.nameRefsRaw),
+		tagsetRefs:      decodeDatadogDeltaRefs(raw.tagsetRefsRaw),
+		resourceRefs:    decodeDatadogDeltaRefs(raw.resourcesRefsRaw),
+		intervalsRaw:    raw.intervalsRaw,
+		numPointsRaw:    raw.numPointsRaw,
+		sourceRefs:      decodeDatadogDeltaRefs(raw.sourceTypeNameRefs),
+		originRefs:      decodeDatadogDeltaRefs(raw.originInfoRefsRaw),
+		unitRefs:        decodeDatadogDeltaRefs(raw.unitRefsRaw),
+		timestamps:      decodeDatadogDeltaValues(raw.timestampsRaw),
+		valsSint64Raw:   raw.valsSint64Raw,
+		valsFloat32Raw:  raw.valsFloat32Raw,
+		valsFloat64Raw:  raw.valsFloat64Raw,
+	}, nil
+}
+
+func (decoded datadogSeriesV3Decoded) buildPayload() (map[string]any, error) {
+	if len(decoded.typesRaw) == 0 {
+		return nil, errors.New("metric series payload had no series")
+	}
+
+	cursor := datadogSeriesV3PointCursor{}
+	series := make([]any, 0, len(decoded.typesRaw))
+	for i, typ := range decoded.typesRaw {
+		row, err := decoded.buildSeriesRow(i, typ, &cursor)
+		if err != nil {
+			return nil, err
+		}
+		series = append(series, row)
+	}
+	return map[string]any{"series": series}, nil
+}
+
+func (decoded datadogSeriesV3Decoded) buildSeriesRow(index int, typ uint64, cursor *datadogSeriesV3PointCursor) (map[string]any, error) {
+	metricType := int(typ & 0x0f)
+	if metricType == datadogMetricTypeSketch {
+		return nil, errors.New("sketch metrics are not supported in /series protobuf decoder")
+	}
+
+	row := map[string]any{}
+	if metric := datadogRefString(decoded.names, datadogRefAt(decoded.nameRefs, index)); metric != "" {
+		row["metric"] = metric
+	}
+	if tags := datadogRefStringSlice(decoded.tagSets, datadogRefAt(decoded.tagsetRefs, index)); len(tags) > 0 {
+		row["tags"] = stringsToAny(tags)
+	}
+	if resources := datadogRefResourceSlice(decoded.resourceSets, datadogRefAt(decoded.resourceRefs, index)); len(resources) > 0 {
+		row["resources"] = resources
+	}
+	if metricTypeName := datadogMetricTypeName(metricType); metricTypeName != "" {
+		row["type"] = metricTypeName
+	}
+	if interval := datadogUint64At(decoded.intervalsRaw, index); interval > 0 {
+		row["interval"] = float64(interval)
+	}
+	if sourceType := datadogRefString(decoded.sourceTypeNames, datadogRefAt(decoded.sourceRefs, index)); sourceType != "" {
+		row["source_type_name"] = sourceType
+	}
+	if unit := datadogRefString(decoded.unitStrings, datadogRefAt(decoded.unitRefs, index)); unit != "" {
+		row["unit"] = unit
+	}
+	if origin := datadogRefOrigin(decoded.originInfo, datadogRefAt(decoded.originRefs, index)); len(origin) > 0 {
+		row["metadata"] = origin
+	}
+
+	points, err := decoded.consumeSeriesPoints(index, typ&0xf0, cursor)
+	if err != nil {
+		return nil, err
 	}
 	if len(points) > 0 {
 		row["points"] = points
 	}
-	if len(resources) > 0 {
-		row["resources"] = resources
-	}
-	if len(metadata) > 0 {
-		row["metadata"] = metadata
-	}
 	return row, nil
+}
+
+func (decoded datadogSeriesV3Decoded) consumeSeriesPoints(index int, valueType uint64, cursor *datadogSeriesV3PointCursor) ([]any, error) {
+	pointCount := int(datadogUint64At(decoded.numPointsRaw, index))
+	if pointCount < 0 || cursor.timestampIndex+pointCount > len(decoded.timestamps) {
+		return nil, fmt.Errorf("series[%d] point count exceeded timestamp payload", index)
+	}
+
+	points := make([]any, 0, pointCount)
+	for pointIndex := range pointCount {
+		value, nextSint, nextFloat32, nextFloat64, err := datadogConsumePointValue(
+			valueType,
+			cursor.sintIndex,
+			cursor.float32Index,
+			cursor.float64Index,
+			decoded.valsSint64Raw,
+			decoded.valsFloat32Raw,
+			decoded.valsFloat64Raw,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("series[%d] point[%d]: %w", index, pointIndex, err)
+		}
+		cursor.sintIndex = nextSint
+		cursor.float32Index = nextFloat32
+		cursor.float64Index = nextFloat64
+
+		points = append(points, []any{
+			float64(decoded.timestamps[cursor.timestampIndex]),
+			value,
+		})
+		cursor.timestampIndex++
+	}
+	return points, nil
+}
+
+func (collector *datadogSeriesV2Collector) consumeField(row map[string]any, num protowire.Number, typ protowire.Type, body []byte) ([]byte, error) {
+	switch num {
+	case 1:
+		raw, next, err := consumeBytesField(typ, body)
+		if err != nil {
+			return nil, err
+		}
+		resource, err := parseDatadogSeriesProtoV2Resource(raw)
+		if err != nil {
+			return nil, err
+		}
+		collector.resources = append(collector.resources, resource)
+		return next, nil
+	case 2:
+		value, next, err := consumeStringField(typ, body)
+		if err != nil {
+			return nil, err
+		}
+		row["metric"] = value
+		return next, nil
+	case 3:
+		value, next, err := consumeStringField(typ, body)
+		if err != nil {
+			return nil, err
+		}
+		collector.tags = append(collector.tags, value)
+		return next, nil
+	case 4:
+		raw, next, err := consumeBytesField(typ, body)
+		if err != nil {
+			return nil, err
+		}
+		point, err := parseDatadogSeriesProtoV2Point(raw)
+		if err != nil {
+			return nil, err
+		}
+		collector.points = append(collector.points, point)
+		return next, nil
+	case 5:
+		value, next, err := consumeVarintField(typ, body)
+		if err != nil {
+			return nil, err
+		}
+		if metricType := datadogMetricTypeName(int(value)); metricType != "" {
+			row["type"] = metricType
+		}
+		return next, nil
+	case 6:
+		return consumeV2StringField(row, "unit", typ, body)
+	case 7:
+		return consumeV2StringField(row, "source_type_name", typ, body)
+	case 8:
+		value, next, err := consumeVarintField(typ, body)
+		if err != nil {
+			return nil, err
+		}
+		row["interval"] = float64(value)
+		return next, nil
+	case 9:
+		raw, next, err := consumeBytesField(typ, body)
+		if err != nil {
+			return nil, err
+		}
+		metadata, err := parseDatadogSeriesProtoV2Metadata(raw)
+		if err != nil {
+			return nil, err
+		}
+		collector.metadata = metadata
+		return next, nil
+	default:
+		return skipFieldValue(num, typ, body)
+	}
+}
+
+func (collector *datadogSeriesV2Collector) finalize(row map[string]any) {
+	if len(collector.tags) > 0 {
+		row["tags"] = collector.tags
+	}
+	if len(collector.points) > 0 {
+		row["points"] = collector.points
+	}
+	if len(collector.resources) > 0 {
+		row["resources"] = collector.resources
+	}
+	if len(collector.metadata) > 0 {
+		row["metadata"] = collector.metadata
+	}
+}
+
+func consumeV2StringField(row map[string]any, key string, typ protowire.Type, body []byte) ([]byte, error) {
+	value, next, err := consumeStringField(typ, body)
+	if err != nil {
+		return nil, err
+	}
+	row[key] = value
+	return next, nil
+}
+
+func consumeV3Bytes(body []byte, typ protowire.Type, target *[]byte) ([]byte, error) {
+	raw, next, err := consumeBytesField(typ, body)
+	if err != nil {
+		return nil, err
+	}
+	*target = raw
+	return next, nil
+}
+
+func consumeV3PackedSint64(body []byte, typ protowire.Type, target *[]int64) ([]byte, error) {
+	values, next, err := consumePackedSint64Field(typ, body)
+	if err != nil {
+		return nil, err
+	}
+	*target = append(*target, values...)
+	return next, nil
+}
+
+func consumeV3PackedInt64(body []byte, typ protowire.Type, target *[]int64) ([]byte, error) {
+	values, next, err := consumePackedInt64Field(typ, body)
+	if err != nil {
+		return nil, err
+	}
+	*target = append(*target, values...)
+	return next, nil
+}
+
+func consumeV3PackedInt32(body []byte, typ protowire.Type, target *[]int64) ([]byte, error) {
+	values, next, err := consumePackedInt32Field(typ, body)
+	if err != nil {
+		return nil, err
+	}
+	*target = append(*target, values...)
+	return next, nil
+}
+
+func consumeV3PackedUint64(body []byte, typ protowire.Type, target *[]uint64) ([]byte, error) {
+	values, next, err := consumePackedUint64Field(typ, body)
+	if err != nil {
+		return nil, err
+	}
+	*target = append(*target, values...)
+	return next, nil
+}
+
+func consumeV3PackedFloat32(body []byte, typ protowire.Type, target *[]float64) ([]byte, error) {
+	values, next, err := consumePackedFloat32Field(typ, body)
+	if err != nil {
+		return nil, err
+	}
+	*target = append(*target, values...)
+	return next, nil
+}
+
+func consumeV3PackedFloat64(body []byte, typ protowire.Type, target *[]float64) ([]byte, error) {
+	values, next, err := consumePackedFloat64Field(typ, body)
+	if err != nil {
+		return nil, err
+	}
+	*target = append(*target, values...)
+	return next, nil
 }
 
 func parseDatadogSeriesProtoV2Resource(body []byte) (map[string]any, error) {
@@ -783,7 +825,7 @@ func parseDatadogTagSets(raw []int64, dictionary []string) ([][]string, error) {
 		}
 		length := int(rawLength)
 		if offset+length > len(raw) {
-			return nil, fmt.Errorf("set length exceeded ref payload")
+			return nil, errors.New("set length exceeded ref payload")
 		}
 
 		set := make([]string, 0, length)
@@ -812,13 +854,13 @@ func parseDatadogResourceSets(lengths, typeRefs, nameRefs []int64, dictionary []
 		}
 		length := int(rawLength)
 		if typeOffset+length > len(typeRefs) || nameOffset+length > len(nameRefs) {
-			return nil, fmt.Errorf("resource set length exceeded ref payload")
+			return nil, errors.New("resource set length exceeded ref payload")
 		}
 
 		currentType := 0
 		currentName := 0
 		resources := make([]any, 0, length)
-		for i := 0; i < length; i++ {
+		for i := range length {
 			currentType += int(typeRefs[typeOffset+i])
 			currentName += int(nameRefs[nameOffset+i])
 			resource := map[string]any{}
@@ -837,7 +879,7 @@ func parseDatadogResourceSets(lengths, typeRefs, nameRefs []int64, dictionary []
 	}
 
 	if typeOffset != len(typeRefs) || nameOffset != len(nameRefs) {
-		return nil, fmt.Errorf("leftover refs after decoding resource dictionary")
+		return nil, errors.New("leftover refs after decoding resource dictionary")
 	}
 
 	return out, nil
@@ -892,17 +934,17 @@ func datadogConsumePointValue(
 		return 0, sintIndex, float32Index, float64Index, nil
 	case datadogValueTypeSint64:
 		if sintIndex >= len(valsSint64) {
-			return 0, sintIndex, float32Index, float64Index, fmt.Errorf("missing sint64 value")
+			return 0, sintIndex, float32Index, float64Index, errors.New("missing sint64 value")
 		}
 		return float64(valsSint64[sintIndex]), sintIndex + 1, float32Index, float64Index, nil
 	case datadogValueTypeFloat32:
 		if float32Index >= len(valsFloat32) {
-			return 0, sintIndex, float32Index, float64Index, fmt.Errorf("missing float32 value")
+			return 0, sintIndex, float32Index, float64Index, errors.New("missing float32 value")
 		}
 		return valsFloat32[float32Index], sintIndex, float32Index + 1, float64Index, nil
 	case datadogValueTypeFloat64:
 		if float64Index >= len(valsFloat64) {
-			return 0, sintIndex, float32Index, float64Index, fmt.Errorf("missing float64 value")
+			return 0, sintIndex, float32Index, float64Index, errors.New("missing float64 value")
 		}
 		return valsFloat64[float64Index], sintIndex, float32Index, float64Index + 1, nil
 	default:

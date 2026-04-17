@@ -32,7 +32,7 @@ func main() {
 	}
 }
 
-func run(logger *zap.Logger) error {
+func run(_ *zap.Logger) error {
 	var (
 		baseURL             = flag.String("endpoint", "http://localhost:8126", "Base URL for the Datadog ingest endpoint")
 		mirrorExporterURL   = flag.String("mirror-exporter-endpoint", "", "Optional second endpoint to send a correlated request to")

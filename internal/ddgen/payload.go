@@ -321,10 +321,6 @@ func randomHex(n int) string {
 	return hex.EncodeToString(buf)
 }
 
-func randomUint63() int64 {
-	return int64(randv2.Uint64() & 0x7fffffffffffffff)
-}
-
 func mutatePayloadForDrop(signal Signal, payload any, probability float64) {
 	if probability <= 0 {
 		return

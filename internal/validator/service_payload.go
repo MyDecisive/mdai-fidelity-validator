@@ -23,7 +23,7 @@ import (
 	"go.uber.org/zap"
 )
 
-func (s *Service) captureRequest(pairID, translatorID, source string, signal Signal, listener, path string, r *http.Request) (*observedPayload, *ComparisonResult, bool, error) {
+func (s *Service) captureRequest(pairID, translatorID, source string, signal Signal, listener, requestPath string, r *http.Request) (*observedPayload, *ComparisonResult, bool, error) {
 	body, err := io.ReadAll(http.MaxBytesReader(noopResponseWriter{}, r.Body, 10<<20))
 	if err != nil {
 		return nil, nil, false, fmt.Errorf("failed to read body: %w", err)
@@ -34,7 +34,7 @@ func (s *Service) captureRequest(pairID, translatorID, source string, signal Sig
 	if err != nil {
 		return nil, nil, false, err
 	}
-	decoded := translator.Decode(signal, path, r.Header.Get("Content-Encoding"), r.Header.Get("Content-Type"), body)
+	decoded := translator.Decode(signal, requestPath, r.Header.Get("Content-Encoding"), r.Header.Get("Content-Type"), body)
 	fields := decoded.Attributes
 	if fields == nil {
 		fields = map[string]string{}
@@ -68,7 +68,7 @@ func (s *Service) captureRequest(pairID, translatorID, source string, signal Sig
 		request: RequestSnapshot{
 			Listener:        listener,
 			Method:          r.Method,
-			Path:            path,
+			Path:            requestPath,
 			Query:           r.URL.RawQuery,
 			ContentType:     r.Header.Get("Content-Type"),
 			ContentEncoding: r.Header.Get("Content-Encoding"),
@@ -347,13 +347,13 @@ func canonicalPort(raw string) (string, bool) {
 
 func (s *Service) captureDatadogAPIRequest(listener string, r *http.Request) {
 	body := mustReadBodyBytes(s, r)
-	path := readRequestPath(r)
-	signal := inferDatadogAPISignal(path)
+	requestPath := readRequestPath(r)
+	signal := inferDatadogAPISignal(requestPath)
 	format := "raw"
 	fields := map[string]string{}
 
 	if len(body) > 0 {
-		if decodedBody, decodedFormat, err := decodeBody(body, path, r.Header.Get("Content-Encoding"), r.Header.Get("Content-Type")); err == nil {
+		if decodedBody, decodedFormat, err := decodeBody(body, requestPath, r.Header.Get("Content-Encoding"), r.Header.Get("Content-Type")); err == nil {
 			fields = flattenValueMap(decodedBody)
 			format = decodedFormat
 		}
@@ -371,7 +371,7 @@ func (s *Service) captureDatadogAPIRequest(listener string, r *http.Request) {
 		request: RequestSnapshot{
 			Listener:        listener,
 			Method:          r.Method,
-			Path:            path,
+			Path:            requestPath,
 			Query:           r.URL.RawQuery,
 			ContentType:     r.Header.Get("Content-Type"),
 			ContentEncoding: r.Header.Get("Content-Encoding"),
@@ -419,13 +419,13 @@ func flattenValue(result map[string]string, prefix string, value any) {
 	}
 }
 
-func inferSignalFromDatadogPath(path string) Signal {
+func inferSignalFromDatadogPath(requestPath string) Signal {
 	switch {
-	case strings.HasSuffix(path, "/traces"):
+	case strings.HasSuffix(requestPath, "/traces"):
 		return SignalTraces
-	case strings.HasSuffix(path, "/series"), strings.HasSuffix(path, "/check_run"), strings.HasSuffix(path, "/sketches"), strings.HasSuffix(path, "/distribution_points"):
+	case strings.HasSuffix(requestPath, "/series"), strings.HasSuffix(requestPath, "/check_run"), strings.HasSuffix(requestPath, "/sketches"), strings.HasSuffix(requestPath, "/distribution_points"):
 		return SignalMetrics
-	case strings.HasSuffix(path, "/logs"):
+	case strings.HasSuffix(requestPath, "/logs"):
 		return SignalLogs
 	default:
 		return SignalUnknown
@@ -433,17 +433,17 @@ func inferSignalFromDatadogPath(path string) Signal {
 }
 
 func parseExporterPath(rawPath string) (string, string) {
-	path := strings.TrimSpace(rawPath)
-	if path == "" {
+	normalizedPath := strings.TrimSpace(rawPath)
+	if normalizedPath == "" {
 		return "", "/"
 	}
-	if !strings.HasPrefix(path, "/") {
-		path = "/" + path
+	if !strings.HasPrefix(normalizedPath, "/") {
+		normalizedPath = "/" + normalizedPath
 	}
 
-	segments := strings.FieldsFunc(path, func(r rune) bool { return r == '/' })
+	segments := strings.FieldsFunc(normalizedPath, func(r rune) bool { return r == '/' })
 	if len(segments) < 2 {
-		return "", path
+		return "", normalizedPath
 	}
 
 	var exporter string
@@ -457,15 +457,15 @@ func parseExporterPath(rawPath string) (string, string) {
 
 	switch segments[0] {
 	case "api", "v0.2", "v0.3", "v0.4", "v0.5", "v1", "v2":
-		return "", path
+		return "", normalizedPath
 	default:
 		exporter = strings.ToLower(strings.TrimSpace(segments[0]))
 		return exporter, "/" + strings.Join(segments[1:], "/")
 	}
 }
 
-func inferDatadogAPISignal(path string) Signal {
-	switch path {
+func inferDatadogAPISignal(requestPath string) Signal {
+	switch requestPath {
 	case "/api/v1/validate":
 		return SignalValidate
 	default:
@@ -473,7 +473,7 @@ func inferDatadogAPISignal(path string) Signal {
 	}
 }
 
-func decodeBody(body []byte, path, contentEncoding, contentType string) (any, string, error) {
+func decodeBody(body []byte, requestPath, contentEncoding, contentType string) (any, string, error) {
 	var decoded []byte
 	format := "json"
 
@@ -484,7 +484,7 @@ func decodeBody(body []byte, path, contentEncoding, contentType string) (any, st
 	}
 
 	if strings.Contains(strings.ToLower(contentType), "protobuf") {
-		payload, err := decodeDatadogSeriesProto(path, decoded)
+		payload, err := decodeDatadogSeriesProto(requestPath, decoded)
 		if err != nil {
 			return nil, "", err
 		}
