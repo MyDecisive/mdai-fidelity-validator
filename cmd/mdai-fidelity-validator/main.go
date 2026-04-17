@@ -36,10 +36,8 @@ func run(logger *zap.Logger) error {
 	ingestAddr := envOrDefault("MDAI_DATADOG_AGENT_INGEST_ADDR", ":8126")
 	exporterAPIAddr := envOrDefault("MDAI_EXPORTER_API_ADDR", ":18081")
 	retention := durationEnvOrDefault(logger, "MDAI_RETENTION", 30*time.Minute)
-	receiverUpstream := os.Getenv("MDAI_RECEIVER_UPSTREAM")
-	exporterUpstream := os.Getenv("MDAI_EXPORTER_UPSTREAM")
 
-	svc, err := validator.NewService(logger, retention, receiverUpstream, exporterUpstream)
+	svc, err := validator.NewService(logger, retention)
 	if err != nil {
 		return err
 	}

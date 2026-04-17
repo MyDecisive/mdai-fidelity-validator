@@ -683,19 +683,15 @@ func TestHandleAdminPairs(t *testing.T) {
 		},
 	}
 
-	body := `{"id":"shadow-b","receiver_translator":"datadog_raw","exporter_translator":"datadog_raw","receiver_upstream":"http://receiver.example:8126","exporter_upstream":"http://exporter.example:8081","default":true}`
+	body := `{"id":"shadow-b","receiver_translator":"datadog_raw","exporter_translator":"datadog_raw","default":true}`
 	req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/admin/pairs", strings.NewReader(body))
 	rec := httptest.NewRecorder()
 
 	svc.handleAdminPairs(rec, req)
 	require.Equal(t, http.StatusAccepted, rec.Code, "body=%s", rec.Body.String())
 
-	pair, ok := svc.pairs["shadow-b"]
+	_, ok := svc.pairs["shadow-b"]
 	require.True(t, ok, "expected pair shadow-b to be saved")
-	require.NotNil(t, pair.receiverUpstream)
-	assert.Equal(t, "http://receiver.example:8126", pair.receiverUpstream.String())
-	require.NotNil(t, pair.exporterUpstream)
-	assert.Equal(t, "http://exporter.example:8081", pair.exporterUpstream.String())
 	assert.Equal(t, "shadow-b", svc.defaultPair)
 
 	body = `{"id":"shadow-c","receiver_translator":"datadog_raw","exporter_translator":"datadog_raw","receiver_ports":["18126"],"exporter_ports":["18081"]}`

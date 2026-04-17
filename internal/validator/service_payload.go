@@ -11,7 +11,6 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"net/url"
 	"path"
 	"slices"
 	"strconv"
@@ -164,14 +163,6 @@ func (s *Service) newConfiguredPair(cfg PairConfig) (configuredPair, error) {
 	if _, err := s.lookupTranslator(exporterTranslator); err != nil {
 		return configuredPair{}, fmt.Errorf("invalid exporter translator: %w", err)
 	}
-	receiverUpstream, err := parseOptionalURL(strings.TrimSpace(cfg.ReceiverUpstream))
-	if err != nil {
-		return configuredPair{}, fmt.Errorf("invalid receiver upstream: %w", err)
-	}
-	exporterUpstream, err := parseOptionalURL(strings.TrimSpace(cfg.ExporterUpstream))
-	if err != nil {
-		return configuredPair{}, fmt.Errorf("invalid exporter upstream: %w", err)
-	}
 	receiverPorts, err := normalizePortList(cfg.ReceiverPorts)
 	if err != nil {
 		return configuredPair{}, fmt.Errorf("invalid receiver ports: %w", err)
@@ -194,15 +185,11 @@ func (s *Service) newConfiguredPair(cfg PairConfig) (configuredPair, error) {
 			ID:                  id,
 			ReceiverTranslator:  receiverTranslator,
 			ExporterTranslator:  exporterTranslator,
-			ReceiverUpstream:    strings.TrimSpace(cfg.ReceiverUpstream),
-			ExporterUpstream:    strings.TrimSpace(cfg.ExporterUpstream),
 			ReceiverPorts:       receiverPorts,
 			ExporterPorts:       exporterPorts,
 			ReceiverIgnorePaths: receiverIgnorePaths,
 			ExporterIgnorePaths: exporterIgnorePaths,
 		},
-		receiverUpstream: receiverUpstream,
-		exporterUpstream: exporterUpstream,
 	}, nil
 }
 
@@ -606,20 +593,6 @@ func selectedHeaders(header http.Header) map[string]string {
 		}
 	}
 	return out
-}
-
-func parseOptionalURL(raw string) (*url.URL, error) {
-	if raw == "" {
-		return nil, nil //nolint:nilnil
-	}
-	parsed, err := url.Parse(raw)
-	if err != nil {
-		return nil, err
-	}
-	if parsed.Scheme == "" || parsed.Host == "" {
-		return nil, errors.New("must include scheme and host")
-	}
-	return parsed, nil
 }
 
 func debugPayloadFromObserved(payload *observedPayload) DebugPayload {

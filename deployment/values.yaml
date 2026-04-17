@@ -24,8 +24,6 @@ env:
   datadogAgentIngestAddr: ":8126"
   exporterAPIAddr: ":18081"
   retention: "30m"
-  receiverUpstream: ""
-  exporterUpstream: ""
   configReloadInterval: "15s"
 
 config:

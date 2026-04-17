@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"net/url"
 	"os"
 	"strings"
 	"sync"
@@ -88,8 +87,6 @@ type PairConfig struct {
 	ID                  string   `json:"id"`
 	ReceiverTranslator  string   `json:"receiver_translator"`
 	ExporterTranslator  string   `json:"exporter_translator"`
-	ReceiverUpstream    string   `json:"receiver_upstream,omitempty"`
-	ExporterUpstream    string   `json:"exporter_upstream,omitempty"`
 	ReceiverPorts       []string `json:"receiver_ports,omitempty"`
 	ExporterPorts       []string `json:"exporter_ports,omitempty"`
 	ReceiverIgnorePaths []string `json:"receiver_ignore_paths,omitempty"`
@@ -98,9 +95,6 @@ type PairConfig struct {
 
 type configuredPair struct {
 	PairConfig
-
-	receiverUpstream *url.URL
-	exporterUpstream *url.URL
 }
 
 type Service struct {
@@ -108,7 +102,6 @@ type Service struct {
 	shards     []*shard
 	retention  time.Duration
 	connection string
-	httpClient *http.Client
 	policy     Policy
 	policyMu   sync.RWMutex
 
@@ -116,8 +109,6 @@ type Service struct {
 	lastByKey    sync.Map
 	pendingTotal atomic.Int64
 
-	receiverUpstream   *url.URL
-	exporterUpstream   *url.URL
 	defaultPair        string
 	translatorMu       sync.RWMutex
 	translators        map[string]PayloadTranslator
@@ -226,15 +217,7 @@ type DebugPayload struct {
 	RawBody       string            `json:"raw_body,omitempty"`
 }
 
-func NewService(logger *zap.Logger, retention time.Duration, receiverUpstream, exporterUpstream string) (*Service, error) {
-	receiverURL, err := parseOptionalURL(receiverUpstream)
-	if err != nil {
-		return nil, fmt.Errorf("invalid receiver upstream: %w", err)
-	}
-	exporterURL, err := parseOptionalURL(exporterUpstream)
-	if err != nil {
-		return nil, fmt.Errorf("invalid exporter upstream: %w", err)
-	}
+func NewService(logger *zap.Logger, retention time.Duration) (*Service, error) {
 	policy, policySource, err := loadPolicy()
 	if err != nil {
 		return nil, fmt.Errorf("load policy: %w", err)
@@ -247,15 +230,12 @@ func NewService(logger *zap.Logger, retention time.Duration, receiverUpstream, e
 	logger.Info("loaded field mapping", zap.String("source", mappingSource))
 
 	svc := &Service{
-		logger:           logger,
-		shards:           make([]*shard, numShards),
-		retention:        retention,
-		connection:       resolveConnectionName(),
-		httpClient:       &http.Client{Timeout: 30 * time.Second},
-		policy:           policy,
-		receiverUpstream: receiverURL,
-		exporterUpstream: exporterURL,
-		defaultPair:      defaultPairID,
+		logger:      logger,
+		shards:      make([]*shard, numShards),
+		retention:   retention,
+		connection:  resolveConnectionName(),
+		policy:      policy,
+		defaultPair: defaultPairID,
 		translators: map[string]PayloadTranslator{
 			defaultTranslatorID: datadogRawTranslator{mapping: newMappingStore(fieldMap)},
 		},
@@ -266,8 +246,6 @@ func NewService(logger *zap.Logger, retention time.Duration, receiverUpstream, e
 					ReceiverTranslator: defaultTranslatorID,
 					ExporterTranslator: defaultTranslatorID,
 				},
-				receiverUpstream: receiverURL,
-				exporterUpstream: exporterURL,
 			},
 		},
 		receiverPairByPort: make(map[string]string),

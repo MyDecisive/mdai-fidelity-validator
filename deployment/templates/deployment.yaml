@@ -76,14 +76,6 @@ spec:
             - name: MDAI_FIDELITY_FIELD_MAPPING_PATH
               value: {{ printf "%s/field-mapping.yaml" .Values.config.mountPath | quote }}
             {{- end }}
-            {{- if .Values.env.receiverUpstream }}
-            - name: MDAI_RECEIVER_UPSTREAM
-              value: {{ .Values.env.receiverUpstream | quote }}
-            {{- end }}
-            {{- if .Values.env.exporterUpstream }}
-            - name: MDAI_EXPORTER_UPSTREAM
-              value: {{ .Values.env.exporterUpstream | quote }}
-            {{- end }}
           {{- if .Values.config.enabled }}
           volumeMounts:
             - name: validator-config

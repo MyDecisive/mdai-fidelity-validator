@@ -2,12 +2,10 @@ package validator
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 	"slices"
 	"strings"
 
@@ -148,8 +146,6 @@ func (s *Service) handleDebugPairs(w http.ResponseWriter, _ *http.Request) {
 			"id":                  pair.ID,
 			"receiver_translator": pair.ReceiverTranslator,
 			"exporter_translator": pair.ExporterTranslator,
-			"receiver_upstream":   pair.ReceiverUpstream,
-			"exporter_upstream":   pair.ExporterUpstream,
 			"receiver_ports":      pair.ReceiverPorts,
 			"exporter_ports":      pair.ExporterPorts,
 			"default":             pair.ID == s.defaultPair,
@@ -217,28 +213,12 @@ func (s *Service) handleExporterAPI(w http.ResponseWriter, r *http.Request) {
 	pair := s.resolvePairForRequest(r, "exporter", ":18081")
 	if pair.shouldIgnorePath("exporter", path) {
 		s.logger.Info("ignoring exporter payload", zap.String("pair", pair.ID), zap.String("path", normalizedPath))
-		body := mustReadBodyBytes(s, r)
-		upstream := pair.exporterUpstream
-		if upstream == nil {
-			upstream = s.exporterUpstream
-		}
-		if upstream == nil {
-			writeDatadogAck(w, signal)
-			return
-		}
-
-		resp, err := s.forwardRaw(r.Context(), upstream, normalizedPath, r.URL.RawQuery, r.Method, r.Header, body)
-		if err != nil {
-			http.Error(w, fmt.Sprintf("forwarding failed: %v", err), http.StatusBadGateway)
-			return
-		}
-		defer closeLogged(s.logger, "close ignored exporter upstream response body", resp.Body)
-
-		copyResponse(s, w, resp)
+		_ = mustReadBodyBytes(s, r)
+		writeDatadogAck(w, signal)
 		return
 	}
 
-	s.handleCommonIngest(w, r, "exporter", signal, ":18081", path, normalizedPath)
+	s.handleCommonIngest(w, r, "exporter", signal, ":18081", path)
 }
 
 func (s *Service) handleProxyIngest(w http.ResponseWriter, r *http.Request) {
@@ -247,66 +227,28 @@ func (s *Service) handleProxyIngest(w http.ResponseWriter, r *http.Request) {
 	pair := s.resolvePairForRequest(r, "receiver", ":8126")
 	if pair.shouldIgnorePath("receiver", path) {
 		s.logger.Info("ignoring receiver payload", zap.String("pair", pair.ID), zap.String("path", path))
-		body := mustReadBodyBytes(s, r)
-		upstream := pair.receiverUpstream
-		if upstream == nil {
-			upstream = s.receiverUpstream
-		}
-		if upstream == nil {
-			writeDatadogAck(w, signal)
-			return
-		}
-
-		resp, err := s.forwardRaw(r.Context(), upstream, path, r.URL.RawQuery, r.Method, r.Header, body)
-		if err != nil {
-			http.Error(w, fmt.Sprintf("forwarding failed: %v", err), http.StatusBadGateway)
-			return
-		}
-		defer closeLogged(s.logger, "close ignored receiver upstream response body", resp.Body)
-
-		copyResponse(s, w, resp)
+		_ = mustReadBodyBytes(s, r)
+		writeDatadogAck(w, signal)
 		return
 	}
 
-	s.handleCommonIngest(w, r, "receiver", signal, ":8126", path, path)
+	s.handleCommonIngest(w, r, "receiver", signal, ":8126", path)
 }
 
-func (s *Service) handleCommonIngest(w http.ResponseWriter, r *http.Request, source string, signal Signal, listener, rawPath, forwardPath string) {
+func (s *Service) handleCommonIngest(w http.ResponseWriter, r *http.Request, source string, signal Signal, listener, rawPath string) {
 	pair := s.resolvePairForRequest(r, source, listener)
 	translator := pair.ReceiverTranslator
-	upstream := pair.receiverUpstream
 	if source == "exporter" {
 		translator = pair.ExporterTranslator
-		upstream = pair.exporterUpstream
 	}
 
-	observed, _, _, err := s.captureRequest(pair.ID, translator, source, signal, listener, rawPath, r)
+	_, _, _, err := s.captureRequest(pair.ID, translator, source, signal, listener, rawPath, r)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 
-	if upstream == nil {
-		if source == "exporter" {
-			upstream = s.exporterUpstream
-		} else {
-			upstream = s.receiverUpstream
-		}
-	}
-
-	if upstream == nil {
-		writeDatadogAck(w, signal)
-		return
-	}
-
-	resp, err := s.forwardRaw(r.Context(), upstream, forwardPath, r.URL.RawQuery, r.Method, r.Header, observed.body)
-	if err != nil {
-		http.Error(w, fmt.Sprintf("forwarding failed: %v", err), http.StatusBadGateway)
-		return
-	}
-	defer closeLogged(s.logger, "close forwarded upstream response body", resp.Body)
-
-	copyResponse(s, w, resp)
+	writeDatadogAck(w, signal)
 }
 
 func (s *Service) handleSource(source string) http.HandlerFunc {
@@ -368,53 +310,6 @@ func mustReadBodyBytes(s *Service, r *http.Request) []byte {
 	return body
 }
 
-func (s *Service) forwardRaw(ctx context.Context, upstream *url.URL, path, rawQuery, method string, header http.Header, body []byte) (*http.Response, error) {
-	target := *upstream
-	target.Path = joinURLPath(upstream.Path, path)
-	target.RawQuery = rawQuery
-
-	req, err := http.NewRequestWithContext(ctx, method, target.String(), bytes.NewReader(body))
-	if err != nil {
-		return nil, err
-	}
-	req.Header = cloneHeaders(header)
-	req.Host = upstream.Host
-	return s.httpClient.Do(req) //nolint:gosec
-}
-
-func joinURLPath(basePath, requestPath string) string {
-	basePath = strings.TrimSuffix(basePath, "/")
-	if requestPath == "" {
-		requestPath = "/"
-	}
-	if strings.HasPrefix(requestPath, "/") {
-		return basePath + requestPath
-	}
-	return basePath + "/" + requestPath
-}
-
-func cloneHeaders(header http.Header) http.Header {
-	cloned := make(http.Header, len(header))
-	for key, values := range header {
-		for _, value := range values {
-			cloned.Add(key, value)
-		}
-	}
-	return cloned
-}
-
-func copyResponse(s *Service, w http.ResponseWriter, resp *http.Response) {
-	for key, values := range resp.Header {
-		for _, value := range values {
-			w.Header().Add(key, value)
-		}
-	}
-	w.WriteHeader(resp.StatusCode)
-	if _, err := io.Copy(w, resp.Body); err != nil {
-		s.logger.Warn("failed to copy upstream response body", zap.Error(err))
-	}
-}
-
 func writeDatadogAck(w http.ResponseWriter, signal Signal) {
 	w.Header().Set("Content-Type", "application/json")
 	switch signal {
@@ -442,14 +337,5 @@ func writeJSON(s *Service, w http.ResponseWriter, status int, payload any) {
 	w.WriteHeader(status)
 	if err := json.NewEncoder(w).Encode(payload); err != nil {
 		s.logger.Error("failed to write response", zap.Error(err))
-	}
-}
-
-func closeLogged(logger *zap.Logger, message string, closer io.Closer) {
-	if closer == nil {
-		return
-	}
-	if err := closer.Close(); err != nil {
-		logger.Warn(message, zap.Error(err))
 	}
 }
