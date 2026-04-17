@@ -232,7 +232,7 @@ func (s *Service) handleExporterAPI(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, fmt.Sprintf("forwarding failed: %v", err), http.StatusBadGateway)
 			return
 		}
-		defer resp.Body.Close() //nolint:errcheck
+		defer closeLogged(s.logger, "close ignored exporter upstream response body", resp.Body)
 
 		copyResponse(s, w, resp)
 		return
@@ -262,7 +262,7 @@ func (s *Service) handleProxyIngest(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, fmt.Sprintf("forwarding failed: %v", err), http.StatusBadGateway)
 			return
 		}
-		defer resp.Body.Close() //nolint:errcheck
+		defer closeLogged(s.logger, "close ignored receiver upstream response body", resp.Body)
 
 		copyResponse(s, w, resp)
 		return
@@ -304,7 +304,7 @@ func (s *Service) handleCommonIngest(w http.ResponseWriter, r *http.Request, sou
 		http.Error(w, fmt.Sprintf("forwarding failed: %v", err), http.StatusBadGateway)
 		return
 	}
-	defer resp.Body.Close() //nolint:errcheck
+	defer closeLogged(s.logger, "close forwarded upstream response body", resp.Body)
 
 	copyResponse(s, w, resp)
 }
@@ -442,5 +442,14 @@ func writeJSON(s *Service, w http.ResponseWriter, status int, payload any) {
 	w.WriteHeader(status)
 	if err := json.NewEncoder(w).Encode(payload); err != nil {
 		s.logger.Error("failed to write response", zap.Error(err))
+	}
+}
+
+func closeLogged(logger *zap.Logger, message string, closer io.Closer) {
+	if closer == nil {
+		return
+	}
+	if err := closer.Close(); err != nil {
+		logger.Warn(message, zap.Error(err))
 	}
 }
