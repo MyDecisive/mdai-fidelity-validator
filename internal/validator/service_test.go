@@ -64,8 +64,6 @@ func newMetricsTestService(connection string) (*Service, *prometheus.Registry) {
 		logger:        zap.NewNop(),
 		shards:        make([]*shard, numShards),
 		connection:    connection,
-		lastBySource:  map[string]*observedPayload{},
-		lastByKey:     map[string]*observedPayload{},
 		translators:   map[string]PayloadTranslator{},
 		receivedTotal: receivedTotal,
 		attributeEval: attributeEval,
@@ -383,18 +381,72 @@ func TestCaptureRequestUsesConnectionLabelForReceivedMetric(t *testing.T) {
 	requireMetricHasConnectionLabel(t, registry, "mdai_fidelity_payloads_received_total", "shadow-b")
 }
 
-func TestUpdatePendingGaugeUsesConnectionLabel(t *testing.T) {
+func TestAdjustPendingTotalUsesConnectionLabel(t *testing.T) {
 	t.Parallel()
 
 	svc, registry := newMetricsTestService("shadow-c")
-	svc.shards[0].pending["traces:a"] = &observedPayload{}
-	svc.shards[1].pending["metrics:b"] = &observedPayload{}
-
-	svc.updatePendingGauge()
+	svc.adjustPendingTotal(2)
 
 	assert.Equal(t, float64(2), gaugeValue(t, svc.pendingGauge.WithLabelValues("shadow-c")))
 
 	requireMetricHasConnectionLabel(t, registry, "mdai_fidelity_pending_payloads", "shadow-c")
+}
+
+func TestObserveDropsExpiredPendingWithoutFullShardGC(t *testing.T) {
+	t.Parallel()
+
+	svc, _ := newMetricsTestService("shadow-expired")
+	svc.retention = time.Second
+
+	correlationID := "metrics:corr-1"
+	sh := svc.getShard(correlationID)
+	sh.pending[correlationID] = &observedPayload{
+		source:      "receiver",
+		signal:      SignalMetrics,
+		correlation: correlationID,
+		receivedAt:  time.Now().Add(-2 * time.Second),
+		flattened:   map[string]string{"metric_name": "stale"},
+	}
+	svc.pendingTotal.Store(1)
+	svc.pendingGauge.WithLabelValues("shadow-expired").Set(1)
+
+	payload := &observedPayload{
+		source:      "exporter",
+		signal:      SignalMetrics,
+		correlation: correlationID,
+		receivedAt:  time.Now(),
+		flattened:   map[string]string{"metric_name": "fresh"},
+	}
+
+	result, matched := svc.observe(payload)
+	assert.False(t, matched)
+	assert.Nil(t, result)
+	assert.Equal(t, int64(1), svc.pendingTotal.Load())
+	assert.Equal(t, float64(1), gaugeValue(t, svc.pendingGauge.WithLabelValues("shadow-expired")))
+}
+
+func TestGCExpiredShardStateRemovesExpiredPendingAndUpdatesGauge(t *testing.T) {
+	t.Parallel()
+
+	svc, _ := newMetricsTestService("shadow-gc")
+	svc.retention = time.Second
+
+	correlationID := "logs:corr-1"
+	sh := svc.getShard(correlationID)
+	sh.pending[correlationID] = &observedPayload{
+		source:      "receiver",
+		signal:      SignalLogs,
+		correlation: correlationID,
+		receivedAt:  time.Now().Add(-2 * time.Second),
+	}
+	svc.pendingTotal.Store(1)
+	svc.pendingGauge.WithLabelValues("shadow-gc").Set(1)
+
+	svc.gcExpiredShardState(time.Now())
+
+	assert.Empty(t, sh.pending)
+	assert.Equal(t, int64(0), svc.pendingTotal.Load())
+	assert.Equal(t, float64(0), gaugeValue(t, svc.pendingGauge.WithLabelValues("shadow-gc")))
 }
 
 func TestResolveCorrelationIDFromHeaderFallbacks(t *testing.T) {
@@ -682,7 +734,7 @@ func TestHandleExporterAPIIgnoresConfiguredPath(t *testing.T) {
 
 	svc.handleExporterAPI(rec, req)
 	require.Equal(t, http.StatusAccepted, rec.Code, "body=%s", rec.Body.String())
-	_, ok := svc.lastBySource["exporter"]
+	_, ok := svc.lastBySource.Load("exporter")
 	assert.False(t, ok, "did not expect ignored exporter payload to be captured")
 }
 

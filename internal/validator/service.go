@@ -10,6 +10,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -111,9 +112,9 @@ type Service struct {
 	policy     Policy
 	policyMu   sync.RWMutex
 
-	regMu        sync.Mutex
-	lastBySource map[string]*observedPayload
-	lastByKey    map[string]*observedPayload
+	lastBySource sync.Map
+	lastByKey    sync.Map
+	pendingTotal atomic.Int64
 
 	receiverUpstream   *url.URL
 	exporterUpstream   *url.URL
@@ -250,8 +251,6 @@ func NewService(logger *zap.Logger, retention time.Duration, receiverUpstream, e
 		shards:           make([]*shard, numShards),
 		retention:        retention,
 		connection:       resolveConnectionName(),
-		lastBySource:     make(map[string]*observedPayload),
-		lastByKey:        make(map[string]*observedPayload),
 		httpClient:       &http.Client{Timeout: 30 * time.Second},
 		policy:           policy,
 		receiverUpstream: receiverURL,
@@ -306,6 +305,7 @@ func NewService(logger *zap.Logger, retention time.Duration, receiverUpstream, e
 		}
 	}
 	svc.startConfigReloader()
+	svc.startMaintenanceLoops()
 	return svc, nil
 }
 

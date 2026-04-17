@@ -76,10 +76,13 @@ func (s *Service) handleDebugLast(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.regMu.Lock()
-	payload, ok := s.lastBySource[source]
-	s.regMu.Unlock()
+	raw, ok := s.lastBySource.Load(source)
 	if !ok {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	payload, ok := raw.(*observedPayload)
+	if !ok || payload == nil {
 		http.Error(w, "not found", http.StatusNotFound)
 		return
 	}
@@ -94,10 +97,13 @@ func (s *Service) handleDebugLastSignal(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	s.regMu.Lock()
-	payload, ok := s.lastByKey[parts[0]+":"+parts[1]]
-	s.regMu.Unlock()
+	raw, ok := s.lastByKey.Load(parts[0] + ":" + parts[1])
 	if !ok {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	payload, ok := raw.(*observedPayload)
+	if !ok || payload == nil {
 		http.Error(w, "not found", http.StatusNotFound)
 		return
 	}
