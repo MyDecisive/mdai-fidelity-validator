@@ -81,9 +81,16 @@ func normalizeFieldsForComparison(signal Signal, fields map[string]string) map[s
 	normalized := make(map[string]string, len(fields))
 	for key, value := range fields {
 		normalizedKey := normalizeFieldKeyForComparison(signal, key)
+		if shouldSkipComparisonField(normalizedKey) {
+			continue
+		}
 		normalized[normalizedKey] = normalizeFieldValueForComparison(signal, normalizedKey, value)
 	}
 	return normalized
+}
+
+func shouldSkipComparisonField(key string) bool {
+	return key == "correlation_id"
 }
 
 func normalizeFieldKeyForComparison(signal Signal, key string) string {

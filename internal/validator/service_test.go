@@ -586,6 +586,43 @@ func TestComparePairStripsCorrelationFromLogMessageJSON(t *testing.T) {
 	assert.True(t, result.FullPayloadPassed, "expected full payload pass, got %#v", result)
 }
 
+func TestComparePairIgnoresCorrelationIDField(t *testing.T) {
+	t.Parallel()
+
+	receiver := &observedPayload{
+		source:      "receiver",
+		signal:      "metrics",
+		correlation: "metrics:corr-1",
+		receivedAt:  time.Now(),
+		flattened: map[string]string{
+			"metric_name":    "ddgen.checkout.duration",
+			"point_value":    "123.45",
+			"correlation_id": "corr-a",
+		},
+	}
+	exporter := &observedPayload{
+		source:      "exporter",
+		signal:      "metrics",
+		correlation: "metrics:corr-1",
+		receivedAt:  time.Now(),
+		flattened: map[string]string{
+			"metric_name":    "ddgen.checkout.duration",
+			"point_value":    "123.45",
+			"correlation_id": "corr-b",
+		},
+	}
+
+	result := comparePair(receiver, exporter, Policy{})
+	assert.True(t, result.FullPayloadPassed, "expected correlation_id to be ignored, got %#v", result)
+	assert.True(t, result.Passed, "expected empty policy to pass, got %#v", result)
+	assert.Equal(t, []string{"metric_name", "point_value"}, result.Matched)
+	assert.Empty(t, result.Mismatched)
+	assert.Empty(t, result.MissingIn)
+	assert.Equal(t, 2, result.AttributeTotal)
+	assert.Equal(t, "corr-a", result.ReceiverRawFields["correlation_id"])
+	assert.Equal(t, "corr-b", result.ExporterRawFields["correlation_id"])
+}
+
 func TestResolvePairForRequest(t *testing.T) {
 	t.Parallel()
 
