@@ -4,7 +4,6 @@ run:
 issues:
   max-same-issues: 20
   max-issues-per-linter: 0
-  max-issues-per-file: 0
 linters:
   default: all
   disable:
