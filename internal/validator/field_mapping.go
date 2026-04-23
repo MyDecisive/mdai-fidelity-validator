@@ -74,12 +74,44 @@ func (m FieldMapping) MapForPath(signal Signal, path string, fields map[string]s
 	exporter, _ := parseExporterPath(path)
 	if exporter != "" {
 		if profile, ok := m.Exporters[strings.ToLower(exporter)]; ok {
-			if mapped := m.mapBySignal(signal, profile.Signals, fields); len(mapped) > 0 {
-				return mapped
-			}
+			return m.mapBySignal(signal, mergeSignalMappings(m.Signals, profile.Signals), fields)
 		}
 	}
 	return m.mapBySignal(signal, m.Signals, fields)
+}
+
+func mergeSignalMappings(base, override map[Signal]map[string][]string) map[Signal]map[string][]string {
+	if len(base) == 0 && len(override) == 0 {
+		return map[Signal]map[string][]string{}
+	}
+
+	merged := make(map[Signal]map[string][]string, len(base)+len(override))
+	for signal, mappings := range base {
+		merged[signal] = cloneCanonicalMappings(mappings)
+	}
+	for signal, mappings := range override {
+		existing, ok := merged[signal]
+		if !ok {
+			merged[signal] = cloneCanonicalMappings(mappings)
+			continue
+		}
+		for canonical, sources := range mappings {
+			existing[canonical] = append([]string(nil), sources...)
+		}
+	}
+	return merged
+}
+
+func cloneCanonicalMappings(input map[string][]string) map[string][]string {
+	if len(input) == 0 {
+		return map[string][]string{}
+	}
+
+	cloned := make(map[string][]string, len(input))
+	for canonical, sources := range input {
+		cloned[canonical] = append([]string(nil), sources...)
+	}
+	return cloned
 }
 
 func (m FieldMapping) mapBySignal(signal Signal, signalMappings map[Signal]map[string][]string, fields map[string]string) map[string]string {

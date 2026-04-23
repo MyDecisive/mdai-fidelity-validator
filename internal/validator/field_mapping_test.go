@@ -31,6 +31,24 @@ func TestFieldMappingMapLogs(t *testing.T) {
 	assert.Equal(t, "corr-1", mapped["correlation_id"])
 }
 
+func TestFieldMappingMapTracesStatus(t *testing.T) {
+	setDefaultFieldMappingPath(t)
+	mapping, _, err := loadFieldMapping()
+	require.NoError(t, err)
+
+	mapped := mapping.Map(SignalTraces, map[string]string{
+		"[0][0].status": "Ok",
+		"[0][0].name":   "ddgen.request",
+	})
+	assert.Equal(t, "Ok", mapped["status"])
+
+	mapped = mapping.MapForPath(SignalTraces, "/exporter/datadog/api/v0.2/traces", map[string]string{
+		"traces[0][0].meta.otel.status_code": "Ok",
+		"traces[0][0].resource":              "ddgen.request",
+	})
+	assert.Equal(t, "Ok", mapped["status"])
+}
+
 func TestExtractMappedValueOps(t *testing.T) {
 	t.Parallel()
 
@@ -46,6 +64,25 @@ func TestExtractMappedValueOps(t *testing.T) {
 	assert.Equal(t, "payments", value)
 }
 
+func TestExtractMappedValuePrefersShallowSuffixMatch(t *testing.T) {
+	t.Parallel()
+
+	fields := map[string]string{
+		"traces[0][0].name":                             "server.request",
+		"traces[0][0].meta.deployment.environment.name": "dev",
+		"traces[0][0].trace_id":                         "218523465776977553",
+		"traces[0][0].meta.otel.trace_id":               "0000000000000000030859ef30b95691",
+	}
+
+	value, ok := extractMappedValue(fields, "suffix:.name")
+	require.True(t, ok)
+	assert.Equal(t, "server.request", value)
+
+	value, ok = extractMappedValue(fields, "suffix:.trace_id")
+	require.True(t, ok)
+	assert.Equal(t, "218523465776977553", value)
+}
+
 func TestFieldMappingMapForPathPrefersExporterSpecificRules(t *testing.T) {
 	t.Parallel()
 
@@ -53,6 +90,7 @@ func TestFieldMappingMapForPathPrefersExporterSpecificRules(t *testing.T) {
 		Signals: map[Signal]map[string][]string{
 			SignalLogs: {
 				"message": []string{"[0].message"},
+				"service": []string{"service"},
 			},
 		},
 		Exporters: map[string]FieldMappingExporters{
@@ -68,9 +106,45 @@ func TestFieldMappingMapForPathPrefersExporterSpecificRules(t *testing.T) {
 
 	mapped := mapping.MapForPath(SignalLogs, "/exporter/splunk/services/collector/event", map[string]string{
 		"[0].message": "datadog-msg",
+		"service":     "svc-a",
 		"event":       "splunk-msg",
 	})
 	assert.Equal(t, "splunk-msg", mapped["message"])
+	assert.Equal(t, "svc-a", mapped["service"])
+}
+
+func TestFieldMappingMapForPathExporterSpecificOverridesOnlySpecifiedKeys(t *testing.T) {
+	t.Parallel()
+
+	mapping := FieldMapping{
+		Signals: map[Signal]map[string][]string{
+			SignalTraces: {
+				"correlation_id": []string{"generic_correlation"},
+				"operation":      []string{"generic_operation"},
+				"service":        []string{"generic_service"},
+			},
+		},
+		Exporters: map[string]FieldMappingExporters{
+			"datadog": {
+				Signals: map[Signal]map[string][]string{
+					SignalTraces: {
+						"operation": []string{"vendor_operation"},
+					},
+				},
+			},
+		},
+	}
+
+	mapped := mapping.MapForPath(SignalTraces, "/exporter/datadog/api/v0.2/traces", map[string]string{
+		"generic_correlation": "corr-1",
+		"generic_operation":   "generic-op",
+		"vendor_operation":    "vendor-op",
+		"generic_service":     "svc-a",
+	})
+
+	assert.Equal(t, "corr-1", mapped["correlation_id"])
+	assert.Equal(t, "vendor-op", mapped["operation"])
+	assert.Equal(t, "svc-a", mapped["service"])
 }
 
 func TestFieldMappingMapForPathUnknownSignalSelectsBestMatch(t *testing.T) {

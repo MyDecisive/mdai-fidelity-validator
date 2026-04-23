@@ -47,7 +47,7 @@ func fieldCandidates(fields map[string]string, base string) []string {
 				candidates = append(candidates, key)
 			}
 		}
-		slices.Sort(candidates)
+		sortFieldCandidates(candidates)
 		return candidates
 	}
 	if after, ok := strings.CutPrefix(base, "suffix:"); ok {
@@ -58,7 +58,7 @@ func fieldCandidates(fields map[string]string, base string) []string {
 				candidates = append(candidates, key)
 			}
 		}
-		slices.Sort(candidates)
+		sortFieldCandidates(candidates)
 		return candidates
 	}
 	if strings.ContainsAny(base, "*?") {
@@ -68,10 +68,33 @@ func fieldCandidates(fields map[string]string, base string) []string {
 				candidates = append(candidates, key)
 			}
 		}
-		slices.Sort(candidates)
+		sortFieldCandidates(candidates)
 		return candidates
 	}
 	return []string{base}
+}
+
+func sortFieldCandidates(candidates []string) {
+	slices.SortFunc(candidates, func(a, b string) int {
+		aDepth := fieldCandidateDepth(a)
+		bDepth := fieldCandidateDepth(b)
+		switch {
+		case aDepth < bDepth:
+			return -1
+		case aDepth > bDepth:
+			return 1
+		case len(a) < len(b):
+			return -1
+		case len(a) > len(b):
+			return 1
+		default:
+			return strings.Compare(a, b)
+		}
+	})
+}
+
+func fieldCandidateDepth(value string) int {
+	return strings.Count(value, ".") + strings.Count(value, "[")
 }
 
 func applyFieldOp(value, op string) (string, bool) {

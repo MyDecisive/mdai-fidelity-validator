@@ -395,6 +395,8 @@ func flattenValue(result map[string]string, prefix string, value any) {
 		}
 	case string:
 		result[prefix] = typed
+	case json.Number:
+		result[prefix] = typed.String()
 	case float64:
 		result[prefix] = strconv.FormatFloat(typed, 'f', -1, 64)
 	case bool:
@@ -442,12 +444,34 @@ func parseExporterPath(rawPath string) (string, string) {
 		return exporter, "/" + strings.Join(segments[2:], "/")
 	}
 
+	if segments[0] == strings.TrimPrefix(observePrefix, "/") && len(segments) >= 3 && segments[1] == "exporter" {
+		for i := 2; i < len(segments); i++ {
+			if isDatadogAPIPrefixSegment(segments[i]) {
+				if i == 2 {
+					return "", "/" + strings.Join(segments[i:], "/")
+				}
+				exporter = strings.ToLower(strings.TrimSpace(segments[i-1]))
+				return exporter, "/" + strings.Join(segments[i:], "/")
+			}
+		}
+		return "", normalizedPath
+	}
+
 	switch segments[0] {
 	case "api", "v0.2", "v0.3", "v0.4", "v0.5", "v1", "v2":
 		return "", normalizedPath
 	default:
 		exporter = strings.ToLower(strings.TrimSpace(segments[0]))
 		return exporter, "/" + strings.Join(segments[1:], "/")
+	}
+}
+
+func isDatadogAPIPrefixSegment(segment string) bool {
+	switch strings.ToLower(strings.TrimSpace(segment)) {
+	case "api", "v0.2", "v0.3", "v0.4", "v0.5", "v1", "v2":
+		return true
+	default:
+		return false
 	}
 }
 
@@ -471,7 +495,7 @@ func decodeBody(body []byte, requestPath, contentEncoding, contentType string) (
 	}
 
 	if strings.Contains(strings.ToLower(contentType), "protobuf") {
-		payload, err := decodeDatadogSeriesProto(requestPath, decoded)
+		payload, err := decodeDatadogProtoByPath(requestPath, decoded)
 		if err != nil {
 			return nil, "", err
 		}
@@ -480,7 +504,9 @@ func decodeBody(body []byte, requestPath, contentEncoding, contentType string) (
 
 	if looksLikeJSON(decoded) || strings.Contains(strings.ToLower(contentType), "json") {
 		var payload any
-		if err := json.Unmarshal(decoded, &payload); err == nil {
+		decoder := json.NewDecoder(bytes.NewReader(decoded))
+		decoder.UseNumber()
+		if err := decoder.Decode(&payload); err == nil {
 			return payload, format, nil
 		}
 	}

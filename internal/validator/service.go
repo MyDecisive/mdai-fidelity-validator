@@ -27,6 +27,7 @@ const (
 	configReloadEnvVar  = "MDAI_CONFIG_RELOAD_INTERVAL"
 	connectionEnvVar    = "MDAI_CONNECTION_NAME"
 	defaultConnection   = "default"
+	observePrefix       = "/observe"
 )
 
 type shard struct {
@@ -305,8 +306,8 @@ func (s *Service) AdminRoutes() http.Handler {
 	mux.HandleFunc("/debug/results", s.handleDebugResults)
 	mux.HandleFunc("/debug/pairs", s.handleDebugPairs)
 	mux.HandleFunc("/admin/pairs", s.handleAdminPairs)
-	mux.HandleFunc("/intake/receiver/", s.handleSource("receiver"))
-	mux.HandleFunc("/intake/exporter/", s.handleSource("exporter"))
+	mux.HandleFunc(observePrefix+"/receiver/", s.handleSource("receiver"))
+	mux.HandleFunc(observePrefix+"/exporter/", s.handleSource("exporter"))
 	mux.HandleFunc("/results/", s.handleResults)
 
 	return mux

@@ -254,7 +254,11 @@ func (s *Service) handleCommonIngest(w http.ResponseWriter, r *http.Request, sou
 func (s *Service) handleSource(source string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		pair := s.resolvePairForRequest(r, source, "admin")
-		signal := strings.TrimPrefix(r.URL.Path, "/intake/"+source+"/")
+		signal, ok := trimSyntheticSourcePath(r.URL.Path, source)
+		if !ok {
+			http.Error(w, "expected /observe/"+source+"/{signal}", http.StatusBadRequest)
+			return
+		}
 		if signal == "" || strings.Contains(signal, "/") {
 			http.Error(w, "signal must be one of traces, metrics, or logs", http.StatusBadRequest)
 			return
@@ -288,6 +292,14 @@ func (s *Service) handleSource(source string) http.HandlerFunc {
 
 		writeJSON(s, w, http.StatusAccepted, response)
 	}
+}
+
+func trimSyntheticSourcePath(rawPath, source string) (string, bool) {
+	prefix := observePrefix + "/" + source + "/"
+	if trimmed := strings.TrimPrefix(rawPath, prefix); trimmed != rawPath {
+		return trimmed, true
+	}
+	return "", false
 }
 
 func readRequestPath(r *http.Request) string {

@@ -220,6 +220,23 @@ func TestDecodeBodyJSONGzip(t *testing.T) {
 	assert.Equal(t, "demo-1", fields["correlation_id"])
 }
 
+func TestDecodeBodyJSONPreservesLargeTraceIDs(t *testing.T) {
+	t.Parallel()
+
+	payload, format, err := decodeBody(
+		[]byte(`[[{"trace_id":218523465776977553,"span_id":6933185253666401645}]]`),
+		"/v0.4/traces",
+		"",
+		"application/json",
+	)
+	require.NoError(t, err)
+	assert.Equal(t, "json", format)
+
+	fields := flattenValueMap(payload)
+	assert.Equal(t, "218523465776977553", fields["[0][0].trace_id"])
+	assert.Equal(t, "6933185253666401645", fields["[0][0].span_id"])
+}
+
 func TestDecodeBodyMsgpack(t *testing.T) {
 	t.Parallel()
 
@@ -283,6 +300,8 @@ func TestParseExporterPath(t *testing.T) {
 		{path: "/api/v2/logs", wantExporter: "", wantNormalized: "/api/v2/logs"},
 		{path: "/exporter/datadog/api/v2/logs", wantExporter: "datadog", wantNormalized: "/api/v2/logs"},
 		{path: "/exporter/datadog", wantExporter: "datadog", wantNormalized: "/"},
+		{path: "/observe/exporter/mdai/sample/gateway/datadog/api/v0.2/traces", wantExporter: "datadog", wantNormalized: "/api/v0.2/traces"},
+		{path: "/intake/exporter/mdai/sample/gateway/datadog/api/v0.2/traces", wantExporter: "intake", wantNormalized: "/exporter/mdai/sample/gateway/datadog/api/v0.2/traces"},
 		{path: "/splunk/services/collector/event", wantExporter: "splunk", wantNormalized: "/services/collector/event"},
 	}
 
@@ -290,6 +309,29 @@ func TestParseExporterPath(t *testing.T) {
 		gotExporter, gotNormalized := parseExporterPath(tc.path)
 		assert.Equal(t, tc.wantExporter, gotExporter, "path=%s", tc.path)
 		assert.Equal(t, tc.wantNormalized, gotNormalized, "path=%s", tc.path)
+	}
+}
+
+func TestTrimSyntheticSourcePath(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		path       string
+		source     string
+		wantSignal string
+		wantOK     bool
+	}{
+		{path: "/observe/exporter/traces", source: "exporter", wantSignal: "traces", wantOK: true},
+		{path: "/observe/receiver/logs", source: "receiver", wantSignal: "logs", wantOK: true},
+		{path: "/intake/exporter/metrics", source: "exporter", wantSignal: "", wantOK: false},
+		{path: "/intake/receiver/traces", source: "receiver", wantSignal: "", wantOK: false},
+		{path: "/api/v2/logs", source: "exporter", wantSignal: "", wantOK: false},
+	}
+
+	for _, tc := range cases {
+		gotSignal, gotOK := trimSyntheticSourcePath(tc.path, tc.source)
+		assert.Equal(t, tc.wantSignal, gotSignal, "path=%s", tc.path)
+		assert.Equal(t, tc.wantOK, gotOK, "path=%s", tc.path)
 	}
 }
 
