@@ -30,6 +30,10 @@ signals:
 #      - "[0].ddtags|tag:correlation_id"
 #      - "ddtags|tag:correlation_id"
   traces:
+    status:
+      - status
+      - "suffix:.status"
+      - "suffix:.meta.otel.status_code"
     trace_id:
       - trace_id
       - "suffix:.trace_id"

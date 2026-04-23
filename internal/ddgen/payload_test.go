@@ -41,6 +41,23 @@ func TestBuildRequestMsgpack(t *testing.T) {
 	assert.Equal(t, ContentEncodingGzip, req.ContentEncoding)
 }
 
+func TestBuildTraceRequestIncludesStatus(t *testing.T) {
+	t.Parallel()
+
+	req, err := BuildRequest(Options{
+		Signal:   SignalTraces,
+		Encoding: EncodingJSON,
+	})
+	require.NoError(t, err)
+
+	var payload [][]map[string]any
+	require.NoError(t, json.Unmarshal(req.Body, &payload))
+	require.Len(t, payload, 1)
+	require.Len(t, payload[0], 2)
+	assert.Equal(t, "Ok", payload[0][0]["status"])
+	assert.Equal(t, "Ok", payload[0][1]["status"])
+}
+
 func TestBuildLogsMsgpackRoundTrip(t *testing.T) {
 	t.Parallel()
 
