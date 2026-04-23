@@ -7,7 +7,7 @@ import (
 )
 
 func (s *Service) getShard(correlationID string) *shard {
-	index := int(xxhash.Sum64String(correlationID) % numShards)
+	index := int(xxhash.Sum64String(correlationID) % numShards) //nolint:gosec // modulo numShards ensures result fits in int
 	return s.shards[index]
 }
 

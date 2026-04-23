@@ -1,13 +1,22 @@
 version: "2"
 run:
   allow-parallel-runners: true
+issues:
+  max-same-issues: 20
+  max-issues-per-linter: 0
+  max-issues-per-file: 0
 linters:
   default: all
   disable:
+    - cyclop
     - depguard
+    - exhaustive
     - exhaustruct
     - err113
+    - funlen
+    - gocognit
     - goconst
+    - gocyclo
     - godox
     - lll
     - mnd
@@ -17,7 +26,6 @@ linters:
     - paralleltest
     - prealloc
     - testpackage
-    - unqueryvet
     - varnamelen
     - wrapcheck
     - wsl

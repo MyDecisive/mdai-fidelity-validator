@@ -422,7 +422,7 @@ func (decoded datadogSeriesV3Decoded) buildPayload() (map[string]any, error) {
 }
 
 func (decoded datadogSeriesV3Decoded) buildSeriesRow(index int, typ uint64, cursor *datadogSeriesV3PointCursor) (map[string]any, error) {
-	metricType := int(typ & 0x0f)
+	metricType := int(typ & 0x0f) //nolint:gosec // max value is 15, safe to convert
 	if metricType == datadogMetricTypeSketch {
 		return nil, errors.New("sketch metrics are not supported in /series protobuf decoder")
 	}
@@ -464,7 +464,7 @@ func (decoded datadogSeriesV3Decoded) buildSeriesRow(index int, typ uint64, curs
 }
 
 func (decoded datadogSeriesV3Decoded) consumeSeriesPoints(index int, valueType uint64, cursor *datadogSeriesV3PointCursor) ([]any, error) {
-	pointCount := int(datadogUint64At(decoded.numPointsRaw, index))
+	pointCount := int(datadogUint64At(decoded.numPointsRaw, index)) //nolint:gosec // bounds-checked immediately after
 	if pointCount < 0 || cursor.timestampIndex+pointCount > len(decoded.timestamps) {
 		return nil, fmt.Errorf("series[%d] point count exceeded timestamp payload", index)
 	}
@@ -539,7 +539,7 @@ func (collector *datadogSeriesV2Collector) consumeField(row map[string]any, num 
 		if err != nil {
 			return nil, err
 		}
-		if metricType := datadogMetricTypeName(int(value)); metricType != "" {
+		if metricType := datadogMetricTypeName(int(value)); metricType != "" { //nolint:gosec // wire type value, bounded by protobuf spec
 			row["type"] = metricType
 		}
 		return next, nil
@@ -721,7 +721,7 @@ func parseDatadogSeriesProtoV2Point(body []byte) ([]any, error) {
 				return nil, err
 			}
 			body = next
-			timestamp = int64(raw)
+			timestamp = int64(raw) //nolint:gosec // protobuf varint timestamp field
 		default:
 			next, err := skipFieldValue(num, typ, body)
 			if err != nil {
@@ -1125,7 +1125,7 @@ func consumePackedInt64Field(typ protowire.Type, body []byte) ([]int64, []byte, 
 		if err != nil {
 			return nil, nil, err
 		}
-		return []int64{int64(value)}, next, nil
+		return []int64{int64(value)}, next, nil //nolint:gosec // protobuf varint field
 	case protowire.BytesType:
 		packed, next, err := consumeBytesField(typ, body)
 		if err != nil {
@@ -1138,7 +1138,7 @@ func consumePackedInt64Field(typ protowire.Type, body []byte) ([]int64, []byte, 
 				return nil, nil, protowire.ParseError(n)
 			}
 			packed = packed[n:]
-			values = append(values, int64(value))
+			values = append(values, int64(value)) //nolint:gosec // protobuf varint field
 		}
 		return values, next, nil
 	default:

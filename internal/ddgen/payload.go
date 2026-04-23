@@ -198,9 +198,9 @@ func buildTracePayload(service, env, host, correlationID string) any {
 	now := time.Now()
 	start := now.Add(-250 * time.Millisecond).UnixNano()
 	duration := int64(250 * time.Millisecond)
-	traceID := randv2.Uint64() & 0x7fffffffffffffff
-	parentSpanID := randv2.Uint64() & 0x7fffffffffffffff
-	childSpanID := randv2.Uint64() & 0x7fffffffffffffff
+	traceID := randv2.Uint64() & 0x7fffffffffffffff      //nolint:gosec // synthetic test data, crypto/rand not needed
+	parentSpanID := randv2.Uint64() & 0x7fffffffffffffff //nolint:gosec // synthetic test data, crypto/rand not needed
+	childSpanID := randv2.Uint64() & 0x7fffffffffffffff  //nolint:gosec // synthetic test data, crypto/rand not needed
 
 	payload := [][]map[string]any{
 		{
@@ -393,7 +393,7 @@ func dropMapKeys(values map[string]any, probability float64, protected map[strin
 		if _, ok := protected[key]; ok {
 			continue
 		}
-		if randv2.Float64() < probability {
+		if randv2.Float64() < probability { //nolint:gosec // synthetic test data, crypto/rand not needed
 			delete(values, key)
 		}
 	}
@@ -406,7 +406,7 @@ func dropTags(tags []string, probability float64) []string {
 			out = append(out, tag)
 			continue
 		}
-		if randv2.Float64() < probability {
+		if randv2.Float64() < probability { //nolint:gosec // synthetic test data, crypto/rand not needed
 			continue
 		}
 		out = append(out, tag)

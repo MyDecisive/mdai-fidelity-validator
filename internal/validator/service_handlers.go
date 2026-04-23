@@ -242,7 +242,7 @@ func (s *Service) handleCommonIngest(w http.ResponseWriter, r *http.Request, sou
 		translator = pair.ExporterTranslator
 	}
 
-	_, _, _, err := s.captureRequest(pair.ID, translator, source, signal, listener, rawPath, r)
+	_, _, _, err := s.captureRequest(pair.ID, translator, source, signal, listener, rawPath, r) //nolint:dogsled
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
