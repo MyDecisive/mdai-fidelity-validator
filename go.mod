@@ -9,6 +9,7 @@ require (
 )
 
 require (
+	github.com/DataDog/zstd v1.5.7
 	github.com/cespare/xxhash/v2 v2.3.0
 	github.com/prometheus/client_model v0.6.2
 	github.com/vmihailenco/msgpack/v5 v5.4.1
