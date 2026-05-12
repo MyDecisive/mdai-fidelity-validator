@@ -18,7 +18,7 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/DataDog/zstd"
+	"github.com/klauspost/compress/zstd"
 	"github.com/vmihailenco/msgpack/v5"
 	"go.uber.org/zap"
 )
@@ -523,7 +523,10 @@ func decodeBody(body []byte, requestPath, contentEncoding, contentType string) (
 func decodeCompression(body []byte, contentEncoding string) ([]byte, error) {
 	switch strings.ToLower(contentEncoding) {
 	case "zstd":
-		reader := zstd.NewReader(bytes.NewReader(body))
+		reader, err := zstd.NewReader(bytes.NewReader(body))
+		if err != nil {
+			return nil, err
+		}
 		defer reader.Close() //nolint:errcheck
 		return io.ReadAll(reader)
 	case "", "identity":
