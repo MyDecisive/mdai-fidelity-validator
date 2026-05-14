@@ -47,10 +47,13 @@ func logObservedPayload(s *Service, payload *observedPayload) {
 
 func logComparisonSummary(s *Service, result ComparisonResult) {
 	requiredPassed := 0
+	requiredFailed := make([]string, 0)
 	for _, check := range result.RequiredChecks {
 		if check.Passed {
 			requiredPassed++
+			continue
 		}
+		requiredFailed = append(requiredFailed, check.Attribute+":"+check.Reason)
 	}
 
 	s.logger.Info("comparison result",
@@ -63,7 +66,26 @@ func logComparisonSummary(s *Service, result ComparisonResult) {
 		zap.Int("missing", len(result.MissingIn)),
 		zap.Int("required_passed", requiredPassed),
 		zap.Int("required_total", len(result.RequiredChecks)),
+		zap.Strings("mismatched_attributes", mismatchAttributeNames(result.Mismatched)),
+		zap.Strings("missing_attributes", missingAttributeNames(result.MissingIn)),
+		zap.Strings("required_failed", requiredFailed),
 	)
+}
+
+func mismatchAttributeNames(deltas []AttributeDelta) []string {
+	names := make([]string, 0, len(deltas))
+	for _, delta := range deltas {
+		names = append(names, delta.Attribute)
+	}
+	return names
+}
+
+func missingAttributeNames(missing []MissingField) []string {
+	names := make([]string, 0, len(missing))
+	for _, item := range missing {
+		names = append(names, item.Attribute+":"+item.Side)
+	}
+	return names
 }
 
 func summarizePolicy(policy Policy) string {

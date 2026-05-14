@@ -778,6 +778,50 @@ func TestConfiguredPairShouldIgnorePath(t *testing.T) {
 	assert.False(t, pair.shouldIgnorePath("exporter", "/exporter/datadog/api/v1/validate"))
 }
 
+func TestDefaultPairIgnoresAgentHousekeeping(t *testing.T) {
+	t.Parallel()
+
+	pair := configuredPair{
+		PairConfig: PairConfig{
+			ID:                 defaultPairID,
+			ReceiverTranslator: defaultTranslatorID,
+			ExporterTranslator: defaultTranslatorID,
+			ReceiverIgnorePaths: []string{
+				"/api/v0.2/stats",
+				"/api/v1/metadata",
+				"/api/beta/sketches",
+				"/support/flare",
+				"/intake/",
+			},
+		},
+	}
+
+	ignored := []string{
+		"/api/v0.2/stats",
+		"/api/v1/metadata",
+		"/api/beta/sketches",
+		"/support/flare",
+		"/intake/",
+	}
+	for _, p := range ignored {
+		assert.True(t, pair.shouldIgnorePath("receiver", p), "should ignore %s", p)
+	}
+
+	kept := []string{
+		"/api/v2/logs",
+		"/v0.4/traces",
+		"/api/v2/series",
+		"/api/v1/series",
+		"/api/v0.2/traces",
+	}
+	for _, p := range kept {
+		assert.False(t, pair.shouldIgnorePath("receiver", p), "should not ignore %s", p)
+	}
+
+	// Ignore list applies to the receiver side only.
+	assert.False(t, pair.shouldIgnorePath("exporter", "/api/v0.2/stats"))
+}
+
 func TestHandleExporterAPIIgnoresConfiguredPath(t *testing.T) {
 	t.Parallel()
 

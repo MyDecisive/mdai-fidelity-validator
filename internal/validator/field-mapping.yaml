@@ -13,9 +13,9 @@ signals:
       - "[0].timestamp"
       - "[0].message|json:timestamp"
     status:
-      - status
-      - "[0].status"
-      - "[0].message|json:status"
+      - "status|lower"
+      - "[0].status|lower"
+      - "[0].message|json:status|lower"
     hostname:
       - hostname
       - "[0].hostname"

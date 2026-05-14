@@ -246,6 +246,15 @@ func NewService(logger *zap.Logger, retention time.Duration) (*Service, error) {
 					ID:                 defaultPairID,
 					ReceiverTranslator: defaultTranslatorID,
 					ExporterTranslator: defaultTranslatorID,
+					// Datadog agent housekeeping and aggregate paths with no
+					// corresponding exporter-side payload or no supported decoder.
+					ReceiverIgnorePaths: []string{
+						"/api/v0.2/stats",
+						"/api/v1/metadata",
+						"/api/beta/sketches",
+						"/support/flare",
+						"/intake/",
+					},
 				},
 			},
 		},
