@@ -296,10 +296,11 @@ func (s *Service) handleSource(source string) http.HandlerFunc {
 
 func trimSyntheticSourcePath(rawPath, source string) (string, bool) {
 	prefix := observePrefix + "/" + source + "/"
-	if trimmed := strings.TrimPrefix(rawPath, prefix); trimmed != rawPath {
-		return trimmed, true
+	trimmed, ok := strings.CutPrefix(rawPath, prefix)
+	if !ok {
+		return "", false
 	}
-	return "", false
+	return trimmed, true
 }
 
 func readRequestPath(r *http.Request) string {

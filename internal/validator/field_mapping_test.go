@@ -64,6 +64,40 @@ func TestExtractMappedValueOps(t *testing.T) {
 	assert.Equal(t, "payments", value)
 }
 
+func TestExtractMappedValueLowerOp(t *testing.T) {
+	t.Parallel()
+
+	fields := map[string]string{
+		"status":     "INFO",
+		"raw_status": `{"level":"WARN"}`,
+		"blank":      "   ",
+	}
+
+	value, ok := extractMappedValue(fields, "status|lower")
+	require.True(t, ok)
+	assert.Equal(t, "info", value)
+
+	value, ok = extractMappedValue(fields, "raw_status|json:level|lower")
+	require.True(t, ok)
+	assert.Equal(t, "warn", value)
+
+	_, ok = extractMappedValue(fields, "blank|lower")
+	assert.False(t, ok)
+}
+
+func TestDefaultMappingLowercasesLogStatus(t *testing.T) {
+	setDefaultFieldMappingPath(t)
+	mapping, _, err := loadFieldMapping()
+	require.NoError(t, err)
+
+	receiver := mapping.MapForPath(SignalLogs, "/api/v2/logs", map[string]string{"status": "info"})
+	exporter := mapping.MapForPath(SignalLogs, "/api/v2/logs", map[string]string{"status": "INFO"})
+
+	assert.Equal(t, "info", receiver["status"])
+	assert.Equal(t, "info", exporter["status"])
+	assert.Equal(t, receiver["status"], exporter["status"])
+}
+
 func TestExtractMappedValuePrefersShallowSuffixMatch(t *testing.T) {
 	t.Parallel()
 

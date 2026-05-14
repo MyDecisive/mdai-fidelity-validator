@@ -111,6 +111,12 @@ func applyFieldOp(value, op string) (string, bool) {
 			return "", false
 		}
 		return trimmed, true
+	case op == "lower":
+		lowered := strings.ToLower(value)
+		if strings.TrimSpace(lowered) == "" {
+			return "", false
+		}
+		return lowered, true
 	default:
 		return "", false
 	}
