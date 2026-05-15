@@ -301,6 +301,7 @@ func TestParseExporterPath(t *testing.T) {
 		{path: "/exporter/datadog/api/v2/logs", wantExporter: "datadog", wantNormalized: "/api/v2/logs"},
 		{path: "/exporter/datadog", wantExporter: "datadog", wantNormalized: "/"},
 		{path: "/observe/exporter/mdai/sample/gateway/datadog/api/v0.2/traces", wantExporter: "datadog", wantNormalized: "/api/v0.2/traces"},
+		{path: "/observe/exporter/mdai/sobodmi-telemetry-validation/sobodmi-sampling-lb/loadbalancing/traces/api/v0.2/traces", wantExporter: "datadog", wantNormalized: "/api/v0.2/traces"},
 		{path: "/intake/exporter/mdai/sample/gateway/datadog/api/v0.2/traces", wantExporter: "intake", wantNormalized: "/exporter/mdai/sample/gateway/datadog/api/v0.2/traces"},
 		{path: "/splunk/services/collector/event", wantExporter: "splunk", wantNormalized: "/services/collector/event"},
 	}

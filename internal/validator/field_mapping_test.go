@@ -181,6 +181,45 @@ func TestFieldMappingMapForPathExporterSpecificOverridesOnlySpecifiedKeys(t *tes
 	assert.Equal(t, "svc-a", mapped["service"])
 }
 
+func TestFieldMappingMapForPathAppliesDatadogProfileToObservePipelinePath(t *testing.T) {
+	t.Parallel()
+
+	mapping := normalizeFieldMapping(FieldMapping{
+		Signals: map[Signal]map[string][]string{
+			SignalTraces: {
+				"operation_name": []string{"suffix:.name"},
+				"resource_name":  []string{"suffix:.resource"},
+				"span_id":        []string{"suffix:.span_id"},
+			},
+		},
+		Exporters: map[string]FieldMappingExporters{
+			"datadog": {
+				Signals: map[Signal]map[string][]string{
+					SignalTraces: {
+						"operation_name": []string{"suffix:.resource", "suffix:.name"},
+						"resource_name":  []string{"suffix:.meta.dd.span.Resource", "suffix:.resource"},
+					},
+				},
+			},
+		},
+	})
+
+	mapped := mapping.MapForPath(
+		SignalTraces,
+		"/observe/exporter/mdai/sobodmi-telemetry-validation/sobodmi-sampling-lb/loadbalancing/traces/api/v0.2/traces",
+		map[string]string{
+			"traces[0][0].name":                  "http.server.request",
+			"traces[0][0].resource":              "GET",
+			"traces[0][0].meta.dd.span.Resource": "/route",
+			"traces[0][0].span_id":               "6343216622348387434",
+		},
+	)
+
+	assert.Equal(t, "GET", mapped["operation_name"])
+	assert.Equal(t, "/route", mapped["resource_name"])
+	assert.Equal(t, "6343216622348387434", mapped["span_id"])
+}
+
 func TestFieldMappingMapForPathUnknownSignalSelectsBestMatch(t *testing.T) {
 	t.Parallel()
 

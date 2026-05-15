@@ -448,11 +448,15 @@ func parseExporterPath(rawPath string) (string, string) {
 	if segments[0] == strings.TrimPrefix(observePrefix, "/") && len(segments) >= 3 && segments[1] == "exporter" {
 		for i := 2; i < len(segments); i++ {
 			if isDatadogAPIPrefixSegment(segments[i]) {
+				normalizedDatadogPath := "/" + strings.Join(segments[i:], "/")
 				if i == 2 {
-					return "", "/" + strings.Join(segments[i:], "/")
+					return "datadog", normalizedDatadogPath
 				}
 				exporter = strings.ToLower(strings.TrimSpace(segments[i-1]))
-				return exporter, "/" + strings.Join(segments[i:], "/")
+				if isSignalPathSegment(exporter) {
+					return "datadog", normalizedDatadogPath
+				}
+				return exporter, normalizedDatadogPath
 			}
 		}
 		return "", normalizedPath
@@ -470,6 +474,15 @@ func parseExporterPath(rawPath string) (string, string) {
 func isDatadogAPIPrefixSegment(segment string) bool {
 	switch strings.ToLower(strings.TrimSpace(segment)) {
 	case "api", "v0.2", "v0.3", "v0.4", "v0.5", "v1", "v2":
+		return true
+	default:
+		return false
+	}
+}
+
+func isSignalPathSegment(segment string) bool {
+	switch strings.ToLower(strings.TrimSpace(segment)) {
+	case string(SignalLogs), string(SignalMetrics), string(SignalTraces):
 		return true
 	default:
 		return false
