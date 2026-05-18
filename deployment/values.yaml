@@ -59,8 +59,8 @@ serviceMonitor:
   namespace: ""
   labels: {}
   annotations: {}
-  interval: ""
-  scrapeTimeout: ""
+  interval: "5s"
+  scrapeTimeout: "1s"
   honorLabels: true
   path: /metrics
   scheme: http
