@@ -33,7 +33,7 @@ func (s *Service) handleResults(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(s, w, http.StatusOK, result)
+	writeJSON(s, w, http.StatusOK, sanitizedComparisonResult(result))
 }
 
 func (s *Service) handleDebugPending(w http.ResponseWriter, _ *http.Request) {
@@ -41,7 +41,7 @@ func (s *Service) handleDebugPending(w http.ResponseWriter, _ *http.Request) {
 	for _, sh := range s.shards {
 		sh.mu.Lock()
 		for _, payload := range sh.pending {
-			pending = append(pending, debugPayloadFromObserved(payload))
+			pending = append(pending, sanitizedDebugPayloadFromObserved(payload))
 		}
 		sh.mu.Unlock()
 	}
@@ -85,7 +85,7 @@ func (s *Service) handleDebugLast(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(s, w, http.StatusOK, debugPayloadFromObserved(payload))
+	writeJSON(s, w, http.StatusOK, sanitizedDebugPayloadFromObserved(payload))
 }
 
 func (s *Service) handleDebugLastSignal(w http.ResponseWriter, r *http.Request) {
@@ -106,7 +106,7 @@ func (s *Service) handleDebugLastSignal(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	writeJSON(s, w, http.StatusOK, debugPayloadFromObserved(payload))
+	writeJSON(s, w, http.StatusOK, sanitizedDebugPayloadFromObserved(payload))
 }
 
 func (s *Service) handleDebugResults(w http.ResponseWriter, _ *http.Request) {
@@ -114,7 +114,7 @@ func (s *Service) handleDebugResults(w http.ResponseWriter, _ *http.Request) {
 	for _, sh := range s.shards {
 		sh.mu.Lock()
 		for _, result := range sh.lastResult {
-			results = append(results, result)
+			results = append(results, sanitizedComparisonResult(result))
 		}
 		sh.mu.Unlock()
 	}

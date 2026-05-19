@@ -352,6 +352,89 @@ func TestSelectedHeaders(t *testing.T) {
 	assert.False(t, ok, "unexpected x-unused in %#v", got)
 }
 
+func TestSanitizedDebugPayloadRedactsDatadogAPIKey(t *testing.T) {
+	t.Parallel()
+
+	payload := &observedPayload{
+		request: RequestSnapshot{
+			Headers: map[string]string{
+				"Content-Type": "application/json",
+				"DD-API-KEY":   "secret",
+				"DD_API_KEY":   "secret",
+			},
+		},
+		flattened: map[string]string{
+			"message":               "ok",
+			"attributes.DD_API_KEY": "secret",
+		},
+	}
+
+	got := sanitizedDebugPayloadFromObserved(payload)
+	assert.Equal(t, "application/json", got.Request.Headers["Content-Type"])
+	assert.NotContains(t, got.Request.Headers, "DD-API-KEY")
+	assert.NotContains(t, got.Request.Headers, "DD_API_KEY")
+	assert.Equal(t, "ok", got.Attributes["message"])
+	assert.Equal(t, "[REDACTED]", got.Attributes["attributes.DD_API_KEY"])
+}
+
+func TestSanitizedDebugPayloadIncludesRawBodyOnlyForDecodeError(t *testing.T) {
+	t.Parallel()
+
+	decoded := &observedPayload{
+		body:        []byte(`{"message":"ok"}`),
+		decodeError: "",
+	}
+	assert.Empty(t, sanitizedDebugPayloadFromObserved(decoded).RawBody)
+
+	mappingError := &observedPayload{
+		body:        []byte(`{"message":"ok"}`),
+		decodeError: "field mapping produced no canonical attributes",
+	}
+	assert.Empty(t, sanitizedDebugPayloadFromObserved(mappingError).RawBody)
+
+	decodeError := &observedPayload{
+		body:        []byte(`{"message":"ok","DD_API_KEY":"secret"}`),
+		decodeError: "failed to decode payload: unsupported payload encoding",
+	}
+	assert.JSONEq(t, `{"message":"ok","DD_API_KEY":"[REDACTED]"}`, sanitizedDebugPayloadFromObserved(decodeError).RawBody)
+}
+
+func TestSanitizedComparisonResultRedactsSensitiveFields(t *testing.T) {
+	t.Parallel()
+
+	result := ComparisonResult{
+		ReceiverFields:    map[string]string{"DD_API_KEY": "receiver-secret", "message": "ok"},
+		ExporterFields:    map[string]string{"attributes.DD_API_KEY": "exporter-secret"},
+		ReceiverRawFields: map[string]string{"resource[0].DD-API-KEY": "receiver-secret"},
+		ExporterRawFields: map[string]string{"message": "ok"},
+		Mismatched: []AttributeDelta{
+			{Attribute: "DD_API_KEY", Receiver: "receiver-secret", Exporter: "exporter-secret"},
+		},
+		MissingIn: []MissingField{
+			{Attribute: "DD_API_KEY", Side: "exporter", Value: "receiver-secret"},
+		},
+		ReceiverWire: RequestSnapshot{
+			Headers: map[string]string{"DD-API-KEY": "receiver-secret", "Content-Type": "application/json"},
+		},
+		ExporterWire: RequestSnapshot{
+			Headers: map[string]string{"DD_API_KEY": "exporter-secret", "Content-Type": "application/json"},
+		},
+	}
+
+	got := sanitizedComparisonResult(result)
+	assert.Equal(t, "[REDACTED]", got.ReceiverFields["DD_API_KEY"])
+	assert.Equal(t, "[REDACTED]", got.ExporterFields["attributes.DD_API_KEY"])
+	assert.Equal(t, "[REDACTED]", got.ReceiverRawFields["resource[0].DD-API-KEY"])
+	assert.Equal(t, "ok", got.ExporterRawFields["message"])
+	assert.Equal(t, "[REDACTED]", got.Mismatched[0].Receiver)
+	assert.Equal(t, "[REDACTED]", got.Mismatched[0].Exporter)
+	assert.Equal(t, "[REDACTED]", got.MissingIn[0].Value)
+	assert.NotContains(t, got.ReceiverWire.Headers, "DD-API-KEY")
+	assert.NotContains(t, got.ExporterWire.Headers, "DD_API_KEY")
+	assert.Equal(t, "application/json", got.ReceiverWire.Headers["Content-Type"])
+	assert.Equal(t, "application/json", got.ExporterWire.Headers["Content-Type"])
+}
+
 func TestRecordMetricsUsesConnectionLabel(t *testing.T) {
 	t.Parallel()
 
