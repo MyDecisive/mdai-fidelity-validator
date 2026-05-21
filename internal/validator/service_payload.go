@@ -339,11 +339,14 @@ func (s *Service) captureDatadogAPIRequest(listener string, r *http.Request) {
 	signal := inferDatadogAPISignal(requestPath)
 	format := "raw"
 	fields := map[string]string{}
+	decodeError := ""
 
 	if len(body) > 0 {
 		if decodedBody, decodedFormat, err := decodeBody(body, requestPath, r.Header.Get("Content-Encoding"), r.Header.Get("Content-Type")); err == nil {
 			fields = flattenValueMap(decodedBody)
 			format = decodedFormat
+		} else {
+			decodeError = fmt.Sprintf("failed to decode payload: %v", err)
 		}
 	}
 
@@ -356,6 +359,7 @@ func (s *Service) captureDatadogAPIRequest(listener string, r *http.Request) {
 		receivedAt:  time.Now().UTC(),
 		body:        body,
 		format:      format,
+		decodeError: decodeError,
 		request: RequestSnapshot{
 			Listener:        listener,
 			Method:          r.Method,
@@ -364,6 +368,7 @@ func (s *Service) captureDatadogAPIRequest(listener string, r *http.Request) {
 			ContentType:     r.Header.Get("Content-Type"),
 			ContentEncoding: r.Header.Get("Content-Encoding"),
 			Format:          format,
+			DecodeError:     decodeError,
 			Headers:         selectedHeaders(r.Header),
 		},
 		flattened: fields,

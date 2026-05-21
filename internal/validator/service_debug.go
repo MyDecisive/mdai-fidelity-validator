@@ -31,7 +31,7 @@ func logCorrelationDecision(s *Service, source string, signal Signal, decision c
 }
 
 func logObservedPayload(s *Service, payload *observedPayload) {
-	debug := debugPayloadFromObserved(payload)
+	debug := sanitizedDebugPayloadFromObserved(payload)
 	body, err := json.Marshal(debug)
 	if err != nil {
 		s.logger.Error("captured payload marshal error",
@@ -43,6 +43,134 @@ func logObservedPayload(s *Service, payload *observedPayload) {
 		return
 	}
 	s.logger.Info("captured payload", zap.String("json", string(body)))
+}
+
+func sanitizedDebugPayloadFromObserved(payload *observedPayload) DebugPayload {
+	debug := debugPayloadFromObserved(payload)
+	debug.Request.Headers = sanitizedHeaders(debug.Request.Headers)
+	debug.Attributes = sanitizedAttributes(debug.Attributes)
+	if shouldIncludeRawPayload(payload) {
+		debug.RawBody = sanitizedRawPayload(debug.RawBody)
+	} else {
+		debug.RawBody = ""
+	}
+	return debug
+}
+
+func sanitizedComparisonResult(result ComparisonResult) ComparisonResult {
+	result.ReceiverFields = sanitizedAttributes(result.ReceiverFields)
+	result.ExporterFields = sanitizedAttributes(result.ExporterFields)
+	result.ReceiverRawFields = sanitizedAttributes(result.ReceiverRawFields)
+	result.ExporterRawFields = sanitizedAttributes(result.ExporterRawFields)
+	result.Mismatched = sanitizedAttributeDeltas(result.Mismatched)
+	result.MissingIn = sanitizedMissingFields(result.MissingIn)
+	result.ReceiverWire.Headers = sanitizedHeaders(result.ReceiverWire.Headers)
+	result.ExporterWire.Headers = sanitizedHeaders(result.ExporterWire.Headers)
+	return result
+}
+
+func sanitizedHeaders(headers map[string]string) map[string]string {
+	if len(headers) == 0 {
+		return headers
+	}
+	sanitized := make(map[string]string, len(headers))
+	for key, value := range headers {
+		if isSensitiveFieldName(key) {
+			sanitized[key] = "[REDACTED]"
+			continue
+		}
+		sanitized[key] = value
+	}
+	return sanitized
+}
+
+func sanitizedAttributes(attributes map[string]string) map[string]string {
+	if len(attributes) == 0 {
+		return attributes
+	}
+	sanitized := make(map[string]string, len(attributes))
+	for key, value := range attributes {
+		if isSensitiveFieldName(key) {
+			sanitized[key] = "[REDACTED]"
+			continue
+		}
+		sanitized[key] = value
+	}
+	return sanitized
+}
+
+func sanitizedAttributeDeltas(deltas []AttributeDelta) []AttributeDelta {
+	if len(deltas) == 0 {
+		return deltas
+	}
+	sanitized := make([]AttributeDelta, len(deltas))
+	for i, delta := range deltas {
+		sanitized[i] = delta
+		if isSensitiveFieldName(delta.Attribute) {
+			sanitized[i].Receiver = "[REDACTED]"
+			sanitized[i].Exporter = "[REDACTED]"
+		}
+	}
+	return sanitized
+}
+
+func sanitizedMissingFields(fields []MissingField) []MissingField {
+	if len(fields) == 0 {
+		return fields
+	}
+	sanitized := make([]MissingField, len(fields))
+	for i, field := range fields {
+		sanitized[i] = field
+		if isSensitiveFieldName(field.Attribute) {
+			sanitized[i].Value = "[REDACTED]"
+		}
+	}
+	return sanitized
+}
+
+func shouldIncludeRawPayload(payload *observedPayload) bool {
+	return strings.Contains(strings.ToLower(payload.decodeError), "decode")
+}
+
+func sanitizedRawPayload(rawBody string) string {
+	var decoded any
+	if err := json.Unmarshal([]byte(rawBody), &decoded); err == nil {
+		sanitizeJSONValue(decoded)
+		if body, err := json.Marshal(decoded); err == nil {
+			return string(body)
+		}
+	}
+	return rawBody
+}
+
+func sanitizeJSONValue(value any) {
+	switch typed := value.(type) {
+	case map[string]any:
+		for key, item := range typed {
+			if isSensitiveFieldName(key) {
+				typed[key] = "[REDACTED]"
+				continue
+			}
+			sanitizeJSONValue(item)
+		}
+	case []any:
+		for _, item := range typed {
+			sanitizeJSONValue(item)
+		}
+	default:
+		return
+	}
+}
+
+func isSensitiveFieldName(name string) bool {
+	normalized := strings.ToUpper(strings.ReplaceAll(name, "-", "_"))
+	parts := strings.FieldsFunc(normalized, func(r rune) bool {
+		return r == '.' || r == '[' || r == ']'
+	})
+	if slices.Contains(parts, "DD_API_KEY") {
+		return true
+	}
+	return normalized == "DD_API_KEY"
 }
 
 func logComparisonSummary(s *Service, result ComparisonResult) {
