@@ -3,14 +3,11 @@ package validator
 import (
 	"encoding/json"
 	"fmt"
-	"regexp"
 	"slices"
 	"strings"
 
 	"go.uber.org/zap"
 )
-
-var rawPayloadSecretPattern = regexp.MustCompile(`(?i)((?:dd[_-]api[_-]key)["']?\s*[:=]\s*["']?)[^"',&\s}]+`)
 
 func logCorrelationDecision(s *Service, source string, signal Signal, decision correlationResolution) {
 	switch decision.Strategy {
@@ -79,6 +76,7 @@ func sanitizedHeaders(headers map[string]string) map[string]string {
 	sanitized := make(map[string]string, len(headers))
 	for key, value := range headers {
 		if isSensitiveFieldName(key) {
+			sanitized[key] = "[REDACTED]"
 			continue
 		}
 		sanitized[key] = value
@@ -138,12 +136,11 @@ func sanitizedRawPayload(rawBody string) string {
 	var decoded any
 	if err := json.Unmarshal([]byte(rawBody), &decoded); err == nil {
 		sanitizeJSONValue(decoded)
-		body, err := json.Marshal(decoded)
-		if err == nil {
+		if body, err := json.Marshal(decoded); err == nil {
 			return string(body)
 		}
 	}
-	return rawPayloadSecretPattern.ReplaceAllString(rawBody, "${1}[REDACTED]")
+	return rawBody
 }
 
 func sanitizeJSONValue(value any) {
