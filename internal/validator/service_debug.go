@@ -1,10 +1,12 @@
 package validator
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"slices"
 	"strings"
+	"unicode/utf8"
 
 	"go.uber.org/zap"
 )
@@ -31,18 +33,22 @@ func logCorrelationDecision(s *Service, source string, signal Signal, decision c
 }
 
 func logObservedPayload(s *Service, payload *observedPayload) {
-	debug := sanitizedDebugPayloadFromObserved(payload)
-	body, err := json.Marshal(debug)
-	if err != nil {
-		s.logger.Error("captured payload marshal error",
-			zap.String("source", payload.source),
-			zap.String("signal", string(payload.signal)),
-			zap.String("correlation_id", payload.correlation),
-			zap.Error(err),
-		)
-		return
+	s.logger.Info("captured payload",
+		zap.String("source", payload.source),
+		zap.String("signal", string(payload.signal)),
+		zap.String("correlation_id", payload.correlation),
+		zap.String("format", payload.format),
+		zap.String("decode_error", payload.decodeError),
+	)
+	if ce := s.logger.Check(zap.DebugLevel, "captured payload detail"); ce != nil {
+		debug := sanitizedDebugPayloadFromObserved(payload)
+		body, err := json.Marshal(debug)
+		if err != nil {
+			ce.Write(zap.Error(err))
+			return
+		}
+		ce.Write(zap.String("json", string(body)))
 	}
-	s.logger.Info("captured payload", zap.String("json", string(body)))
 }
 
 func sanitizedDebugPayloadFromObserved(payload *observedPayload) DebugPayload {
@@ -50,11 +56,16 @@ func sanitizedDebugPayloadFromObserved(payload *observedPayload) DebugPayload {
 	debug.Request.Headers = sanitizedHeaders(debug.Request.Headers)
 	debug.Attributes = sanitizedAttributes(debug.Attributes)
 	if shouldIncludeRawPayload(payload) {
-		debug.RawBody = sanitizedRawPayload(debug.RawBody)
-	} else {
-		debug.RawBody = ""
+		debug.RawBody = sanitizedRawPayload(rawBodyFromPayload(payload))
 	}
 	return debug
+}
+
+func rawBodyFromPayload(payload *observedPayload) string {
+	if !utf8.Valid(payload.body) {
+		return base64.StdEncoding.EncodeToString(payload.body)
+	}
+	return string(payload.body)
 }
 
 func sanitizedComparisonResult(result ComparisonResult) ComparisonResult {
@@ -140,7 +151,7 @@ func sanitizedRawPayload(rawBody string) string {
 			return string(body)
 		}
 	}
-	return rawBody
+	return "[unparseable payload redacted]"
 }
 
 func sanitizeJSONValue(value any) {
@@ -167,10 +178,7 @@ func isSensitiveFieldName(name string) bool {
 	parts := strings.FieldsFunc(normalized, func(r rune) bool {
 		return r == '.' || r == '[' || r == ']'
 	})
-	if slices.Contains(parts, "DD_API_KEY") {
-		return true
-	}
-	return normalized == "DD_API_KEY"
+	return slices.Contains(parts, "DD_API_KEY")
 }
 
 func logComparisonSummary(s *Service, result ComparisonResult) {

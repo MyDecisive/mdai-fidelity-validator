@@ -1,6 +1,7 @@
 package validator
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -124,6 +125,9 @@ type Service struct {
 	requiredEval  *prometheus.CounterVec
 	requiredSig   *prometheus.CounterVec
 	pendingGauge  *prometheus.GaugeVec
+
+	ingestAddr      string
+	exporterAPIAddr string
 }
 
 type mappingStore struct {
@@ -218,7 +222,7 @@ type DebugPayload struct {
 	RawBody       string            `json:"raw_body,omitempty"`
 }
 
-func NewService(logger *zap.Logger, retention time.Duration) (*Service, error) {
+func NewService(ctx context.Context, logger *zap.Logger, retention time.Duration, ingestAddr, exporterAPIAddr string) (*Service, error) {
 	policy, policySource, err := loadPolicy()
 	if err != nil {
 		return nil, fmt.Errorf("load policy: %w", err)
@@ -284,6 +288,9 @@ func NewService(logger *zap.Logger, retention time.Duration) (*Service, error) {
 			Name: "mdai_fidelity_pending_payloads",
 			Help: "Number of payloads waiting for their correlated counterpart by connection.",
 		}, []string{"mdai_connection"}),
+
+		ingestAddr:      ingestAddr,
+		exporterAPIAddr: exporterAPIAddr,
 	}
 
 	for i := range numShards {
@@ -292,8 +299,8 @@ func NewService(logger *zap.Logger, retention time.Duration) (*Service, error) {
 			lastResult: make(map[string]ComparisonResult),
 		}
 	}
-	svc.startConfigReloader()
-	svc.startMaintenanceLoops()
+	svc.startConfigReloader(ctx)
+	svc.startMaintenanceLoops(ctx)
 	return svc, nil
 }
 
@@ -367,7 +374,7 @@ func (s *Service) setMapping(next FieldMapping) {
 	raw.mapping.Set(next)
 }
 
-func (s *Service) startConfigReloader() {
+func (s *Service) startConfigReloader(ctx context.Context) {
 	interval := 15 * time.Second
 	if raw := strings.TrimSpace(os.Getenv(configReloadEnvVar)); raw != "" {
 		parsed, err := time.ParseDuration(raw)
@@ -410,8 +417,14 @@ func (s *Service) startConfigReloader() {
 	go func() {
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
-		for range ticker.C {
-			reload()
+
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				reload()
+			}
 		}
 	}()
 }

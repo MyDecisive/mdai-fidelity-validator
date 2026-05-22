@@ -156,6 +156,8 @@ func applyJSONOp(value, fieldPath string) (string, bool) {
 			return "", false
 		}
 		return typed, true
+	case nil:
+		return "", false
 	default:
 		body, err := json.Marshal(typed)
 		if err != nil {

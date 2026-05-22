@@ -627,7 +627,7 @@ func TestSanitizedRawPayload(t *testing.T) {
 		{
 			name:  "non-JSON body returned as-is",
 			input: "not json at all",
-			want:  "not json at all",
+			want:  "[unparseable payload redacted]",
 		},
 		{
 			name:  "JSON without sensitive fields passes through unchanged",

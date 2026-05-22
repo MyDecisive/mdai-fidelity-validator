@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"compress/gzip"
 	"compress/zlib"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -16,12 +15,31 @@ import (
 	"strconv"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	"github.com/klauspost/compress/zstd"
 	"github.com/vmihailenco/msgpack/v5"
 	"go.uber.org/zap"
 )
+
+const maxDecompressedSize = 50 << 20 // 50MB decompressed cap to prevent zip-bomb OOM
+
+var selectedHeaderkeys = [...]string{ //nolint:gochecknoglobals
+	"Content-Type",
+	"Content-Encoding",
+	"User-Agent",
+	"DD-API-KEY",
+	"DD-Agent-Version",
+	"Datadog-Meta-Tracer-Version",
+	"Datadog-Meta-Lang",
+	"Datadog-Meta-Lang-Version",
+	"X-Correlation-ID",
+	"X-Fidelity-Pair",
+	"X-Request-ID",
+	"Host",
+	"X-Forwarded-Port",
+	"X-Forwarded-Host",
+	"X-Envoy-Original-Dst-Host",
+}
 
 func (s *Service) captureRequest(pairID, translatorID, source string, signal Signal, listener, requestPath string, r *http.Request) (*observedPayload, *ComparisonResult, bool, error) {
 	body, err := io.ReadAll(http.MaxBytesReader(noopResponseWriter{}, r.Body, 10<<20))
@@ -87,7 +105,7 @@ func (s *Service) captureRequest(pairID, translatorID, source string, signal Sig
 		return observed, nil, false, nil
 	}
 	result, matched := s.observe(observed)
-	if matched && result != nil && source == "exporter" {
+	if matched && result != nil {
 		logComparisonSummary(s, *result)
 	}
 	return observed, result, matched, nil
@@ -98,8 +116,8 @@ func (s *Service) lookupTranslator(name string) (PayloadTranslator, error) { //n
 		name = defaultTranslatorID
 	}
 	s.translatorMu.RLock()
+	defer s.translatorMu.RUnlock()
 	translator, ok := s.translators[name]
-	s.translatorMu.RUnlock()
 	if !ok {
 		return nil, fmt.Errorf("unknown translator %q", name)
 	}
@@ -512,9 +530,10 @@ func decodeBody(body []byte, requestPath, contentEncoding, contentType string) (
 		var payload any
 		decoder := json.NewDecoder(bytes.NewReader(decoded))
 		decoder.UseNumber()
-		if err := decoder.Decode(&payload); err == nil {
-			return payload, format, nil
+		if err := decoder.Decode(&payload); err != nil {
+			return nil, "", fmt.Errorf("failed to decode JSON: %w", err)
 		}
+		return payload, format, nil
 	}
 
 	var payload any
@@ -533,7 +552,7 @@ func decodeCompression(body []byte, contentEncoding string) ([]byte, error) {
 			return nil, err
 		}
 		defer reader.Close() //nolint:errcheck
-		return io.ReadAll(reader)
+		return readLimited(reader, maxDecompressedSize)
 	case "", "identity":
 		if isGzip(body) {
 			return gunzip(body)
@@ -546,6 +565,17 @@ func decodeCompression(body []byte, contentEncoding string) ([]byte, error) {
 	default:
 		return nil, fmt.Errorf("unsupported content encoding %q", contentEncoding)
 	}
+}
+
+func readLimited(r io.Reader, maxSize int64) ([]byte, error) {
+	data, err := io.ReadAll(io.LimitReader(r, maxSize+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > maxSize {
+		return nil, fmt.Errorf("decompressed payload exceeds %d bytes", maxSize)
+	}
+	return data, nil
 }
 
 func normalizeMsgpackValue(value any) any {
@@ -593,7 +623,7 @@ func gunzip(body []byte) ([]byte, error) {
 	}
 	defer reader.Close() //nolint:errcheck
 
-	return io.ReadAll(reader)
+	return readLimited(reader, maxDecompressedSize)
 }
 
 func inflate(body []byte) ([]byte, error) {
@@ -603,30 +633,12 @@ func inflate(body []byte) ([]byte, error) {
 	}
 	defer reader.Close() //nolint:errcheck
 
-	return io.ReadAll(reader)
+	return readLimited(reader, maxDecompressedSize)
 }
 
 func selectedHeaders(header http.Header) map[string]string {
-	keys := []string{
-		"Content-Type",
-		"Content-Encoding",
-		"User-Agent",
-		"DD-API-KEY",
-		"DD-Agent-Version",
-		"Datadog-Meta-Tracer-Version",
-		"Datadog-Meta-Lang",
-		"Datadog-Meta-Lang-Version",
-		"X-Correlation-ID",
-		"X-Fidelity-Pair",
-		"X-Request-ID",
-		"Host",
-		"X-Forwarded-Port",
-		"X-Forwarded-Host",
-		"X-Envoy-Original-Dst-Host",
-	}
-
 	out := make(map[string]string)
-	for _, key := range keys {
+	for _, key := range selectedHeaderkeys {
 		if value := header.Get(key); value != "" {
 			out[key] = value
 		}
@@ -635,11 +647,6 @@ func selectedHeaders(header http.Header) map[string]string {
 }
 
 func debugPayloadFromObserved(payload *observedPayload) DebugPayload {
-	rawBody := string(payload.body)
-	if !utf8.Valid(payload.body) {
-		rawBody = base64.StdEncoding.EncodeToString(payload.body)
-	}
-
 	return DebugPayload{
 		Pair:          payload.pair,
 		Translator:    payload.translator,
@@ -650,6 +657,5 @@ func debugPayloadFromObserved(payload *observedPayload) DebugPayload {
 		Format:        payload.format,
 		Request:       payload.request,
 		Attributes:    payload.flattened,
-		RawBody:       rawBody,
 	}
 }
