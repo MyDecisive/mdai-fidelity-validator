@@ -53,7 +53,7 @@ signals:
   metrics:
     correlation_id:
       - correlation_id
-      - "contains:.tags[|tag:correlation_id"
+      - "contains:tags[|tag:correlation_id"
     metric_name:
       - metric_name
       - "suffix:.metric"
@@ -67,7 +67,7 @@ signals:
       - "suffix:.value"
     service:
       - service
-      - "contains:.tags[|tag:service"
+      - "contains:tags[|tag:service"
     env:
       - env
-      - "contains:.tags[|tag:env"
+      - "contains:tags[|tag:env"

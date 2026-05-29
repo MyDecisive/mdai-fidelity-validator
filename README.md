@@ -8,7 +8,7 @@
 - Captures raw Datadog receiver-side requests on `:8126` and raw exporter-side requests on `:18081`.
 - Decodes JSON, gzipped JSON, MessagePack, Datadog metric protobuf payloads on `/series`, and Datadog trace protobuf payloads on `/traces` so it can inspect raw Datadog-style payloads from a receiver proxy and a Datadog exporter.
 - Flattens each decoded payload into `attribute.path -> value` form so every incoming field is explicitly denoted in the response.
-- Correlates payload pairs using `X-Correlation-ID` when present, otherwise preferring `correlation_id` across nested Datadog-style paths before falling back to a derived fingerprint.
+- Correlates payload pairs using `X-Correlation-ID` when present. Trace payloads prefer `span_id`, then `trace_id`, then `correlation_id`; other signals prefer `correlation_id` across nested Datadog-style paths before falling back to a derived fingerprint.
 - Compares all flattened attributes and exports Prometheus metrics for both per-attribute and per-signal pass/fail results.
 
 ## Prometheus metrics
