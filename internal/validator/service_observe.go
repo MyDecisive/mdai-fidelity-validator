@@ -1,6 +1,7 @@
 package validator
 
 import (
+	"context"
 	"time"
 
 	"github.com/cespare/xxhash/v2"
@@ -68,19 +69,24 @@ func (s *Service) gcShardLocked(sh *shard, now time.Time) int {
 func (s *Service) adjustPendingTotal(delta int64) {
 	total := s.pendingTotal.Add(delta)
 	if total < 0 {
-		s.pendingTotal.Store(0)
+		s.pendingTotal.CompareAndSwap(total, 0)
 		total = 0
 	}
 	s.pendingGauge.WithLabelValues(s.connection).Set(float64(total))
 }
 
-func (s *Service) startMaintenanceLoops() {
+func (s *Service) startMaintenanceLoops(ctx context.Context) {
 	interval := shardGCInterval(s.retention)
 	go func() {
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
-		for now := range ticker.C {
-			s.gcExpiredShardState(now.UTC())
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case now := <-ticker.C:
+				s.gcExpiredShardState(now.UTC())
+			}
 		}
 	}()
 }

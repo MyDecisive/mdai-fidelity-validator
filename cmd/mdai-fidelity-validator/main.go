@@ -14,6 +14,13 @@ import (
 	"go.uber.org/zap"
 )
 
+type serverTimeouts struct {
+	ReadHeaderTimeout time.Duration
+	ReadTimeout       time.Duration
+	WriteTimeout      time.Duration
+	IdleTimeout       time.Duration
+}
+
 func main() {
 	logger, err := zap.NewProduction()
 	if err != nil {
@@ -37,31 +44,18 @@ func run(logger *zap.Logger) error {
 	exporterAPIAddr := envOrDefault("MDAI_EXPORTER_API_ADDR", ":18081")
 	retention := durationEnvOrDefault(logger, "MDAI_RETENTION", 30*time.Minute)
 
-	svc, err := validator.NewService(logger, retention)
+	stopCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	svc, err := validator.NewService(stopCtx, logger, retention, ingestAddr, exporterAPIAddr)
 	if err != nil {
 		return err
 	}
 
-	adminServer := &http.Server{
-		Addr:              adminAddr,
-		Handler:           svc.AdminRoutes(),
-		ReadHeaderTimeout: 5 * time.Second,
-	}
-	metricsServer := &http.Server{
-		Addr:              metricsAddr,
-		Handler:           svc.MetricsRoutes(),
-		ReadHeaderTimeout: 5 * time.Second,
-	}
-	ingestServer := &http.Server{
-		Addr:              ingestAddr,
-		Handler:           svc.IngestRoutes(),
-		ReadHeaderTimeout: 5 * time.Second,
-	}
-	datadogAPIServer := &http.Server{
-		Addr:              exporterAPIAddr,
-		Handler:           svc.ExporterAPIRoutes(),
-		ReadHeaderTimeout: 5 * time.Second,
-	}
+	adminServer := newHTTPServer(adminAddr, svc.AdminRoutes(), defaultServerTimeouts())
+	metricsServer := newHTTPServer(metricsAddr, svc.MetricsRoutes(), defaultServerTimeouts())
+	ingestServer := newHTTPServer(ingestAddr, svc.IngestRoutes(), defaultServerTimeouts())
+	datadogAPIServer := newHTTPServer(exporterAPIAddr, svc.ExporterAPIRoutes(), defaultServerTimeouts())
 
 	errCh := make(chan error, 4)
 	go serve("admin", adminServer, logger, errCh)
@@ -75,9 +69,6 @@ func run(logger *zap.Logger) error {
 		zap.String("datadog_agent_ingest", ingestAddr),
 		zap.String("exporter_api", exporterAPIAddr),
 	)
-
-	stopCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
 
 	var serveErr error
 	select {
@@ -131,4 +122,24 @@ func durationEnvOrDefault(logger *zap.Logger, key string, fallback time.Duration
 	}
 
 	return fallback
+}
+
+func newHTTPServer(addr string, handler http.Handler, timeouts serverTimeouts) *http.Server {
+	return &http.Server{
+		Addr:              addr,
+		Handler:           handler,
+		ReadHeaderTimeout: timeouts.ReadHeaderTimeout,
+		ReadTimeout:       timeouts.ReadTimeout,
+		WriteTimeout:      timeouts.WriteTimeout,
+		IdleTimeout:       timeouts.IdleTimeout,
+	}
+}
+
+func defaultServerTimeouts() serverTimeouts {
+	return serverTimeouts{
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       60 * time.Second,
+	}
 }

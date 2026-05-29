@@ -15,7 +15,7 @@ func comparePair(a, b *observedPayload, policy Policy) ComparisonResult {
 	}
 
 	receiverCompareFields := normalizeFieldsForComparison(receiver.signal, receiver.flattened)
-	exporterCompareFields := normalizeFieldsForComparison(receiver.signal, exporter.flattened)
+	exporterCompareFields := normalizeFieldsForComparison(exporter.signal, exporter.flattened)
 
 	result := ComparisonResult{
 		Signal:            receiver.signal,
@@ -144,6 +144,10 @@ func stripCorrelationFromDDTags(tags string) string {
 func stripCorrelationFromMessageJSON(message string) string {
 	trimmed := strings.TrimSpace(message)
 	if !strings.HasPrefix(trimmed, "{") {
+		return message
+	}
+
+	if !strings.Contains(trimmed, `"correlation_id"`) {
 		return message
 	}
 
