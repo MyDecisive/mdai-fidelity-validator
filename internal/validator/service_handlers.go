@@ -242,7 +242,7 @@ func (s *Service) handleCommonIngest(w http.ResponseWriter, r *http.Request, sou
 		translator = pair.ExporterTranslator
 	}
 
-	_, _, _, err := s.captureRequest(pair.ID, translator, source, signal, listener, rawPath, r) //nolint:dogsled
+	_, _, _, err := s.captureRequests(pair.ID, translator, source, signal, listener, rawPath, r) //nolint:dogsled
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -268,26 +268,56 @@ func (s *Service) handleSource(source string) http.HandlerFunc {
 		if source == "exporter" {
 			translator = pair.ExporterTranslator
 		}
-		observed, result, matched, err := s.captureRequest(pair.ID, translator, source, Signal(signal), "admin", readRequestPath(r), r)
+		payloads, results, anyMatched, err := s.captureRequests(pair.ID, translator, source, Signal(signal), "admin", readRequestPath(r), r)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
+		}
+		if len(payloads) == 0 {
+			http.Error(w, "no payloads captured", http.StatusInternalServerError)
+			return
+		}
+
+		// Top-level fields reflect the first item for backward compatibility.
+		first := payloads[0]
+		var firstResult *ComparisonResult
+		for _, res := range results {
+			if res != nil {
+				sanitized := sanitizedComparisonResult(*res)
+				firstResult = &sanitized
+				break
+			}
 		}
 
 		response := map[string]any{
 			"pair":           pair.ID,
 			"source":         source,
 			"signal":         signal,
-			"correlation_id": observed.correlation,
-			"format":         observed.format,
-			"attributes":     observed.flattened,
-			"matched":        matched,
+			"correlation_id": first.correlation,
+			"format":         first.format,
+			"attributes":     first.flattened,
+			"matched":        anyMatched,
 		}
-		if observed.decodeError != "" {
-			response["decode_error"] = observed.decodeError
+		if first.decodeError != "" {
+			response["decode_error"] = first.decodeError
 		}
-		if result != nil {
-			response["comparison"] = result
+		if firstResult != nil {
+			response["comparison"] = firstResult
+		}
+		if len(payloads) > 1 {
+			items := make([]map[string]any, 0, len(payloads))
+			for i, p := range payloads {
+				item := map[string]any{
+					"correlation_id": p.correlation,
+					"attributes":     p.flattened,
+				}
+				if results[i] != nil {
+					sanitized := sanitizedComparisonResult(*results[i])
+					item["comparison"] = sanitized
+				}
+				items = append(items, item)
+			}
+			response["items"] = items
 		}
 
 		writeJSON(s, w, http.StatusAccepted, response)

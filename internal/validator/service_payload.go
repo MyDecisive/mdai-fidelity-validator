@@ -41,7 +41,13 @@ var selectedHeaderkeys = [...]string{ //nolint:gochecknoglobals
 	"X-Envoy-Original-Dst-Host",
 }
 
-func (s *Service) captureRequest(pairID, translatorID, source string, signal Signal, listener, requestPath string, r *http.Request) (*observedPayload, *ComparisonResult, bool, error) {
+// captureRequests decodes an HTTP request body and produces one observedPayload per item group.
+// If the translator implements BatchDecoder, DecodeAll is called to get per-group decoded payloads
+// (one per trace group for traces, one per metric series for metrics). Otherwise Decode is called
+// and a single payload is produced. Splitting at this level lets batches fanned-out by the
+// collector still match the correct receiver item by natural ID (trace_id, series fingerprint)
+// rather than by the HTTP-request-level correlation header.
+func (s *Service) captureRequests(pairID, translatorID, source string, signal Signal, listener, requestPath string, r *http.Request) ([]*observedPayload, []*ComparisonResult, bool, error) {
 	body, err := io.ReadAll(http.MaxBytesReader(noopResponseWriter{}, r.Body, 10<<20))
 	if err != nil {
 		return nil, nil, false, fmt.Errorf("failed to read body: %w", err)
@@ -52,63 +58,96 @@ func (s *Service) captureRequest(pairID, translatorID, source string, signal Sig
 	if err != nil {
 		return nil, nil, false, err
 	}
-	decoded := translator.Decode(signal, requestPath, r.Header.Get("Content-Encoding"), r.Header.Get("Content-Type"), body)
-	fields := decoded.Attributes
-	if fields == nil {
-		fields = map[string]string{}
+
+	var decodedItems []DecodedPayload
+	if bd, ok := translator.(BatchDecoder); ok {
+		decodedItems = bd.DecodeAll(signal, requestPath, r.Header.Get("Content-Encoding"), r.Header.Get("Content-Type"), body)
+	} else {
+		decodedItems = []DecodedPayload{translator.Decode(signal, requestPath, r.Header.Get("Content-Encoding"), r.Header.Get("Content-Type"), body)}
 	}
-	effectiveSignal := decoded.Signal
-	if effectiveSignal == SignalUnknown {
-		effectiveSignal = signal
-	}
-	format := decoded.Format
-	if format == "" {
-		format = "raw"
-	}
-	decodeError := decoded.DecodeError
-	if err := validateCanonicalAttributes(fields); err != nil {
-		decodeError = firstNonEmpty(decodeError, fmt.Sprintf("invalid canonical attributes: %v", err))
+	if len(decodedItems) == 0 {
+		decodedItems = []DecodedPayload{{Signal: signal, Attributes: map[string]string{}, Format: "raw"}}
 	}
 
-	correlationDecision := resolveCorrelationIDFromDecoded(effectiveSignal, decoded.CorrelationID, fields, r.Header, body)
-	correlationID := correlationDecision.CorrelationID
+	// Count once per HTTP request regardless of how many items are in the batch.
+	firstSignal := decodedItems[0].Signal
+	if firstSignal == SignalUnknown {
+		firstSignal = signal
+	}
+	s.receivedTotal.WithLabelValues(s.connection, source, string(firstSignal)).Inc()
 
-	observed := &observedPayload{
-		pair:        pairID,
-		translator:  translator.Name(),
-		source:      source,
-		signal:      effectiveSignal,
-		correlation: correlationID,
-		receivedAt:  time.Now().UTC(),
-		body:        body,
-		format:      format,
-		decodeError: decodeError,
-		request: RequestSnapshot{
-			Listener:        listener,
-			Method:          r.Method,
-			Path:            requestPath,
-			Query:           r.URL.RawQuery,
-			ContentType:     r.Header.Get("Content-Type"),
-			ContentEncoding: r.Header.Get("Content-Encoding"),
-			Format:          format,
-			DecodeError:     decodeError,
-			Headers:         selectedHeaders(r.Header),
-		},
-		flattened: fields,
+	now := time.Now().UTC()
+	baseSnapshot := RequestSnapshot{
+		Listener:        listener,
+		Method:          r.Method,
+		Path:            requestPath,
+		Query:           r.URL.RawQuery,
+		ContentType:     r.Header.Get("Content-Type"),
+		ContentEncoding: r.Header.Get("Content-Encoding"),
+		Headers:         selectedHeaders(r.Header),
 	}
 
-	s.receivedTotal.WithLabelValues(s.connection, source, string(effectiveSignal)).Inc()
-	logCorrelationDecision(s, source, signal, correlationDecision)
-	logObservedPayload(s, observed)
-	if decodeError != "" {
-		s.rememberObserved(observed)
-		return observed, nil, false, nil
+	payloads := make([]*observedPayload, 0, len(decodedItems))
+	results := make([]*ComparisonResult, 0, len(decodedItems))
+	anyMatched := false
+
+	for _, decoded := range decodedItems {
+		fields := decoded.Attributes
+		if fields == nil {
+			fields = map[string]string{}
+		}
+		effectiveSignal := decoded.Signal
+		if effectiveSignal == SignalUnknown {
+			effectiveSignal = signal
+		}
+		format := decoded.Format
+		if format == "" {
+			format = "raw"
+		}
+		decodeError := decoded.DecodeError
+		if err := validateCanonicalAttributes(fields); err != nil {
+			decodeError = firstNonEmpty(decodeError, fmt.Sprintf("invalid canonical attributes: %v", err))
+		}
+
+		correlationDecision := resolveCorrelationIDFromDecoded(effectiveSignal, decoded.CorrelationID, fields, r.Header, body)
+
+		snapshot := baseSnapshot
+		snapshot.Format = format
+		snapshot.DecodeError = decodeError
+
+		observed := &observedPayload{
+			pair:        pairID,
+			translator:  translator.Name(),
+			source:      source,
+			signal:      effectiveSignal,
+			correlation: correlationDecision.CorrelationID,
+			receivedAt:  now,
+			body:        body,
+			format:      format,
+			decodeError: decodeError,
+			request:     snapshot,
+			flattened:   fields,
+			rawGroup:    decoded.RawGroup,
+		}
+		logCorrelationDecision(s, source, signal, correlationDecision)
+		logObservedPayload(s, observed)
+		payloads = append(payloads, observed)
+
+		if decodeError != "" {
+			s.rememberObserved(observed)
+			results = append(results, nil)
+			continue
+		}
+
+		result, matched := s.observe(observed)
+		if matched && result != nil {
+			logComparisonSummary(s, *result)
+			anyMatched = true
+		}
+		results = append(results, result)
 	}
-	result, matched := s.observe(observed)
-	if matched && result != nil {
-		logComparisonSummary(s, *result)
-	}
-	return observed, result, matched, nil
+
+	return payloads, results, anyMatched, nil
 }
 
 func (s *Service) lookupTranslator(name string) (PayloadTranslator, error) { //nolint:ireturn
@@ -394,6 +433,64 @@ func (s *Service) captureDatadogAPIRequest(listener string, r *http.Request) {
 
 	logObservedPayload(s, observed)
 	s.rememberObserved(observed)
+}
+
+func hasKeyPrefix(m map[string]string, prefix string) bool {
+	for k := range m {
+		if strings.HasPrefix(k, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+// extractIndexedGroups partitions a flat attribute map by the leading array index of a named
+// top-level key (e.g. "traces" or "series"). Keys whose prefix is "<name>[i]" are grouped under
+// index i with the "<name>[i]" prefix stripped, so each group looks like a standalone payload.
+// If no keys match the prefix the original map is returned as a single-element slice.
+func extractIndexedGroups(flattened map[string]string, name string) []map[string]string {
+	bracketPrefix := name + "["
+	groups := make(map[int]map[string]string)
+	maxIdx := -1
+
+	for key, value := range flattened {
+		if !strings.HasPrefix(key, bracketPrefix) {
+			continue
+		}
+		rest := strings.TrimPrefix(key, bracketPrefix)
+		idxStr, after, ok := strings.Cut(rest, "]")
+		if !ok {
+			continue
+		}
+		idx, err := strconv.Atoi(idxStr)
+		if err != nil {
+			continue
+		}
+		subKey := after
+		subKey = strings.TrimPrefix(subKey, ".")
+		if subKey == "" {
+			subKey = key
+		}
+		if _, ok := groups[idx]; !ok {
+			groups[idx] = make(map[string]string)
+		}
+		groups[idx][subKey] = value
+		if idx > maxIdx {
+			maxIdx = idx
+		}
+	}
+
+	if len(groups) == 0 {
+		return []map[string]string{flattened}
+	}
+
+	out := make([]map[string]string, 0, len(groups))
+	for i := 0; i <= maxIdx; i++ {
+		if g, ok := groups[i]; ok {
+			out = append(out, g)
+		}
+	}
+	return out
 }
 
 func flattenValueMap(payload any) map[string]string {

@@ -74,6 +74,9 @@ func comparePair(a, b *observedPayload, policy Policy) ComparisonResult {
 	result.AttributeTotal = len(allKeys)
 	result.FullPayloadPassed = len(result.Mismatched) == 0 && len(result.MissingIn) == 0
 	result.RequiredChecks, result.Passed = evaluatePolicy(result.Signal, receiver.flattened, exporter.flattened, policy)
+	if result.Signal == SignalTraces && (receiver.rawGroup != nil || exporter.rawGroup != nil) {
+		result.Spans = compareSpans(receiver.rawGroup, exporter.rawGroup)
+	}
 	return result
 }
 
