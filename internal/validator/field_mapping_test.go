@@ -181,6 +181,29 @@ func TestFieldMappingMapForPathExporterSpecificOverridesOnlySpecifiedKeys(t *tes
 	assert.Equal(t, "svc-a", mapped["service"])
 }
 
+func TestFieldMappingMetricCorrelationFromBatchExplodedTags(t *testing.T) {
+	// After extractIndexedGroups strips the "series[i]" prefix, metric group keys are
+	// top-level: "tags[j]" instead of "series[0].tags[j]". The default mapping must still
+	// extract correlation_id via "contains:tags[|tag:correlation_id".
+	setDefaultFieldMappingPath(t)
+	mapping, _, err := loadFieldMapping()
+	require.NoError(t, err)
+
+	// Simulate the per-series group after batch explode (series[i] prefix stripped).
+	fields := map[string]string{
+		"metric":  "ddgen.checkout.duration",
+		"type":    "gauge",
+		"tags[0]": "service:checkout",
+		"tags[1]": "env:staging",
+		"tags[2]": "correlation_id:corr-batch-explode",
+	}
+
+	mapped := mapping.Map(SignalMetrics, fields)
+	assert.Equal(t, "corr-batch-explode", mapped["correlation_id"])
+	assert.Equal(t, "checkout", mapped["service"])
+	assert.Equal(t, "staging", mapped["env"])
+}
+
 func TestFieldMappingMapForPathUnknownSignalSelectsBestMatch(t *testing.T) {
 	t.Parallel()
 

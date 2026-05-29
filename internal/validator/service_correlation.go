@@ -33,7 +33,7 @@ func deriveCorrelationFromFields(signal Signal, fields map[string]string) string
 }
 
 func deriveCorrelationFromFieldsDetailed(signal Signal, fields map[string]string) (string, string, string, bool) {
-	for _, key := range correlationCandidates(fields) {
+	for _, key := range correlationCandidates(signal, fields) {
 		if candidate := correlationValueForField(key, fields[key]); candidate != "" {
 			return string(signal) + ":" + candidate, key, fields[key], true
 		}
@@ -42,7 +42,20 @@ func deriveCorrelationFromFieldsDetailed(signal Signal, fields map[string]string
 }
 
 func resolveCorrelationIDFromDecoded(signal Signal, translatorCorrelationID string, fields map[string]string, headers http.Header, body []byte) correlationResolution {
-	if translatorCorrelationID = strings.TrimSpace(translatorCorrelationID); translatorCorrelationID != "" {
+	translatorCorrelationID = strings.TrimSpace(translatorCorrelationID)
+	if signal == SignalTraces {
+		// For traces, prefer span_id > trace_id > correlation_id from intrinsic fields before falling back to headers.
+		if correlationID, field, rawValue, ok := deriveCorrelationFromFieldsDetailed(signal, fields); ok {
+			return correlationResolution{
+				CorrelationID: correlationID,
+				Strategy:      "field",
+				Field:         field,
+				RawValue:      rawValue,
+			}
+		}
+		return resolveCorrelationID(signal, fields, headers, body)
+	}
+	if translatorCorrelationID != "" {
 		return correlationResolution{
 			CorrelationID: string(signal) + ":" + translatorCorrelationID,
 			Strategy:      "translator",
@@ -138,12 +151,7 @@ func deriveRawBodyCorrelationID(signal Signal, body []byte) string {
 	return string(signal) + ":" + hex.EncodeToString(hash[:8])
 }
 
-func correlationCandidates(fields map[string]string) []string {
-	exact := []string{
-		"correlation_id",
-		"trace_id",
-	}
-
+func correlationCandidates(signal Signal, fields map[string]string) []string {
 	keys := make([]string, 0, len(fields))
 	for key := range fields {
 		keys = append(keys, key)
@@ -162,8 +170,28 @@ func correlationCandidates(fields map[string]string) []string {
 		}
 	}
 
-	for _, key := range exact {
-		add(key)
+	// Exact canonical key priority differs by signal.
+	// Traces: span_id > trace_id > correlation_id.
+	// Others: correlation_id > trace_id.
+	if signal == SignalTraces {
+		for _, key := range []string{"span_id", "trace_id", "correlation_id"} {
+			add(key)
+		}
+		// Suffix fallbacks for unmapped traces fields, respecting the same priority.
+		for _, key := range keys {
+			if strings.HasSuffix(strings.ToLower(key), ".span_id") {
+				add(key)
+			}
+		}
+		for _, key := range keys {
+			if strings.HasSuffix(strings.ToLower(key), ".trace_id") {
+				add(key)
+			}
+		}
+	} else {
+		for _, key := range []string{"correlation_id", "trace_id"} {
+			add(key)
+		}
 	}
 
 	for _, key := range keys {
@@ -175,7 +203,7 @@ func correlationCandidates(fields map[string]string) []string {
 			strings.Contains(lower, "correlationid"),
 			strings.HasSuffix(lower, ".ddtags"),
 			lower == "ddtags",
-			strings.Contains(lower, ".tags[") && strings.Contains(valueLower, "correlation_id:"):
+			strings.Contains(lower, "tags[") && strings.Contains(valueLower, "correlation_id:"):
 			add(key)
 		default:
 		}
@@ -186,7 +214,7 @@ func correlationCandidates(fields map[string]string) []string {
 
 func correlationValueForField(key, value string) string {
 	lowerKey := strings.ToLower(key)
-	if strings.Contains(lowerKey, ".tags[") {
+	if strings.Contains(lowerKey, "tags[") {
 		if parsed := parseCorrelationTag(value); parsed != "" {
 			return parsed
 		}

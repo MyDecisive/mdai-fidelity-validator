@@ -268,9 +268,59 @@ func TestCorrelationCandidatesPreferCorrelationIDPaths(t *testing.T) {
 		"logs[0].attributes.otherthing": "value",
 	}
 
-	candidates := correlationCandidates(fields)
+	candidates := correlationCandidates(SignalUnknown, fields)
 	require.NotEmpty(t, candidates)
 	assert.Contains(t, []string{"resource.correlation_id", "correlation_id"}, candidates[0])
+}
+
+func TestCorrelationCandidatesTracesPreferSpanIDOverTraceIDOverCorrelationID(t *testing.T) {
+	t.Parallel()
+
+	fields := map[string]string{
+		"span_id":        "span-111",
+		"trace_id":       "trace-222",
+		"correlation_id": "corr-333",
+	}
+
+	candidates := correlationCandidates(SignalTraces, fields)
+	require.GreaterOrEqual(t, len(candidates), 3)
+	assert.Equal(t, "span_id", candidates[0])
+	assert.Equal(t, "trace_id", candidates[1])
+	assert.Equal(t, "correlation_id", candidates[2])
+}
+
+func TestCorrelationCandidatesTracesUseSuffixFallback(t *testing.T) {
+	t.Parallel()
+
+	// When canonical keys are absent (no field mapping applied), suffix scans should
+	// still respect span_id > trace_id > correlation_id ordering.
+	fields := map[string]string{
+		"[0][0].span_id":             "span-111",
+		"[0][0].trace_id":            "trace-222",
+		"[0][0].meta.correlation_id": "corr-333",
+	}
+
+	candidates := correlationCandidates(SignalTraces, fields)
+	require.GreaterOrEqual(t, len(candidates), 3)
+	assert.Equal(t, "[0][0].span_id", candidates[0])
+	assert.Equal(t, "[0][0].trace_id", candidates[1])
+	assert.Equal(t, "[0][0].meta.correlation_id", candidates[2])
+}
+
+func TestResolveCorrelationIDFromDecodedTracesPreferSpanID(t *testing.T) {
+	t.Parallel()
+
+	fields := map[string]string{
+		"span_id":        "span-abc",
+		"trace_id":       "trace-def",
+		"correlation_id": "corr-xyz",
+	}
+
+	// Even when the translator extracted a correlation_id, traces should prefer span_id.
+	res := resolveCorrelationIDFromDecoded(SignalTraces, "corr-xyz", fields, http.Header{}, nil)
+	assert.Equal(t, "traces:span-abc", res.CorrelationID)
+	assert.Equal(t, "field", res.Strategy)
+	assert.Equal(t, "span_id", res.Field)
 }
 
 func TestInferSignalFromDatadogPath(t *testing.T) {
@@ -871,6 +921,23 @@ func TestDeriveCorrelationFromMetricTagsBeforeMetricName(t *testing.T) {
 
 	got := deriveCorrelationFromFields("metrics", fields)
 	assert.Equal(t, "metrics:corr-123", got)
+}
+
+func TestDeriveCorrelationFromBatchExplodedMetricTags(t *testing.T) {
+	t.Parallel()
+
+	// After extractIndexedGroups strips the "series[i]" prefix, keys are top-level:
+	// "tags[j]" not "series[0].tags[j]". Correlation extraction must still work.
+	fields := map[string]string{
+		"metric":  "ddgen.checkout.duration",
+		"tags[0]": "service:checkout",
+		"tags[1]": "env:dev",
+		"tags[2]": "correlation_id:corr-456",
+		"type":    "gauge",
+	}
+
+	got := deriveCorrelationFromFields("metrics", fields)
+	assert.Equal(t, "metrics:corr-456", got)
 }
 
 func TestDeriveCorrelationFromLogDDTags(t *testing.T) {
