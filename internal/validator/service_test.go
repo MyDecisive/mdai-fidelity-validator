@@ -1269,6 +1269,49 @@ func TestComparePairStripsCorrelationFromLogMessageJSON(t *testing.T) {
 	assert.True(t, result.FullPayloadPassed, "expected full payload pass, got %#v", result)
 }
 
+func TestComparePairSpanMissingInExporterFailsFullPayloadPassed(t *testing.T) {
+	t.Parallel()
+
+	receiver := &observedPayload{
+		source:      "receiver",
+		signal:      "traces",
+		correlation: "abc",
+		receivedAt:  time.Now(),
+		flattened: map[string]string{
+			"trace_id": "t1",
+			"span_id":  "s1",
+		},
+		rawGroup: map[string]string{
+			"[0].span_id": "s1",
+			"[0].name":    "root",
+			"[1].span_id": "s2",
+			"[1].name":    "child",
+		},
+	}
+	exporter := &observedPayload{
+		source:      "exporter",
+		signal:      "traces",
+		correlation: "abc",
+		receivedAt:  time.Now(),
+		flattened: map[string]string{
+			"trace_id": "t1",
+			"span_id":  "s1",
+		},
+		rawGroup: map[string]string{
+			"[0].span_id": "s1",
+			"[0].name":    "root",
+		},
+	}
+
+	result := comparePair(receiver, exporter, Policy{})
+
+	assert.False(t, result.FullPayloadPassed)
+	require.Len(t, result.Spans, 2)
+	assert.Empty(t, result.Spans[0].OnlyIn)
+	assert.True(t, result.Spans[0].Passed)
+	assert.Equal(t, "receiver", result.Spans[1].OnlyIn)
+}
+
 func TestComparePairIgnoresCorrelationIDField(t *testing.T) {
 	t.Parallel()
 
