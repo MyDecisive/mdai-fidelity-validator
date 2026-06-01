@@ -22,12 +22,20 @@ import (
 type staticTranslator struct {
 	name    string
 	decoded DecodedPayload
+	batch   []DecodedPayload // when set, DecodeAll returns this slice; implements BatchDecoder
 }
 
 func (t staticTranslator) Name() string { return t.name }
 
 func (t staticTranslator) Decode(_ Signal, _, _, _ string, _ []byte) DecodedPayload {
 	return t.decoded
+}
+
+func (t staticTranslator) DecodeAll(_ Signal, _, _, _ string, _ []byte) []DecodedPayload {
+	if len(t.batch) > 0 {
+		return t.batch
+	}
+	return []DecodedPayload{t.decoded}
 }
 
 func newMetricsTestService(connection string) (*Service, *prometheus.Registry) {
@@ -792,7 +800,7 @@ func TestCaptureRequestUsesConnectionLabelForReceivedMetric(t *testing.T) {
 		strings.NewReader(`{"trace_id":"123"}`),
 	)
 
-	observed, result, matched, err := svc.captureRequest(
+	payloads, results, matched, err := svc.captureRequests(
 		defaultPairID,
 		defaultTranslatorID,
 		"receiver",
@@ -802,8 +810,8 @@ func TestCaptureRequestUsesConnectionLabelForReceivedMetric(t *testing.T) {
 		req,
 	)
 	require.NoError(t, err)
-	require.NotNil(t, observed)
-	assert.Nil(t, result)
+	require.NotEmpty(t, payloads)
+	assert.Nil(t, results[0])
 	assert.False(t, matched)
 	assert.InDelta(t, float64(1), counterValue(t, svc.receivedTotal.WithLabelValues("shadow-b", "receiver", "traces")), 0.000001)
 
@@ -819,6 +827,235 @@ func TestAdjustPendingTotalUsesConnectionLabel(t *testing.T) {
 	assert.InDelta(t, float64(2), gaugeValue(t, svc.pendingGauge.WithLabelValues("shadow-c")), 0.000001)
 
 	requireMetricHasConnectionLabel(t, registry, "mdai_fidelity_pending_payloads", "shadow-c")
+}
+
+func TestExtractIndexedGroupsTraces(t *testing.T) {
+	t.Parallel()
+
+	flattened := map[string]string{
+		"traces[0][0].trace_id": "trace-aaa",
+		"traces[0][0].span_id":  "span-111",
+		"traces[0][1].trace_id": "trace-aaa",
+		"traces[0][1].span_id":  "span-222",
+		"traces[1][0].trace_id": "trace-bbb",
+		"traces[1][0].span_id":  "span-333",
+	}
+
+	groups := extractIndexedGroups(flattened, "traces")
+	require.Len(t, groups, 2)
+
+	assert.Equal(t, "trace-aaa", groups[0]["[0].trace_id"])
+	assert.Equal(t, "span-111", groups[0]["[0].span_id"])
+	assert.Equal(t, "trace-aaa", groups[0]["[1].trace_id"])
+	assert.Equal(t, "span-222", groups[0]["[1].span_id"])
+
+	assert.Equal(t, "trace-bbb", groups[1]["[0].trace_id"])
+	assert.Equal(t, "span-333", groups[1]["[0].span_id"])
+}
+
+func TestExtractIndexedGroupsMetrics(t *testing.T) {
+	t.Parallel()
+
+	flattened := map[string]string{
+		"series[0].metric":    "cpu.usage",
+		"series[0].points[0]": "42",
+		"series[1].metric":    "mem.usage",
+		"series[1].points[0]": "1024",
+	}
+
+	groups := extractIndexedGroups(flattened, "series")
+	require.Len(t, groups, 2)
+	assert.Equal(t, "cpu.usage", groups[0]["metric"])
+	assert.Equal(t, "mem.usage", groups[1]["metric"])
+}
+
+func TestExtractIndexedGroupsNoMatchReturnsOriginal(t *testing.T) {
+	t.Parallel()
+
+	flattened := map[string]string{
+		"trace_id": "abc",
+		"span_id":  "def",
+	}
+
+	groups := extractIndexedGroups(flattened, "traces")
+	require.Len(t, groups, 1)
+	assert.Equal(t, flattened, groups[0])
+}
+
+// TestDecodeAllTracesUnwrappedFormat verifies that /v0.4/traces payloads (root-level [[span,...]]
+// with no "traces" wrapper) are correctly split into per-trace groups and that individual span
+// maps have bare field names (e.g. "span_id", "name") suitable for span matching.
+func TestDecodeAllTracesUnwrappedFormat(t *testing.T) {
+	t.Parallel()
+
+	// Two trace groups: trace-aaa has 2 spans, trace-bbb has 1 span.
+	// Flat keys follow the unwrapped [[span,...]] structure.
+	rawFlat := map[string]string{
+		"[0][0].trace_id": "trace-aaa",
+		"[0][0].span_id":  "span-111",
+		"[0][0].name":     "web.request",
+		"[0][1].trace_id": "trace-aaa",
+		"[0][1].span_id":  "span-222",
+		"[0][1].name":     "db.query",
+		"[1][0].trace_id": "trace-bbb",
+		"[1][0].span_id":  "span-333",
+		"[1][0].name":     "background.job",
+	}
+
+	// hasKeyPrefix should detect no "traces[" key and choose root-level grouping.
+	assert.False(t, hasKeyPrefix(rawFlat, "traces["))
+
+	groups := extractIndexedGroups(rawFlat, "")
+	require.Len(t, groups, 2)
+
+	// Each group should contain [j].field keys for its spans.
+	assert.Equal(t, "trace-aaa", groups[0]["[0].trace_id"])
+	assert.Equal(t, "span-111", groups[0]["[0].span_id"])
+	assert.Equal(t, "trace-aaa", groups[0]["[1].trace_id"])
+	assert.Equal(t, "span-222", groups[0]["[1].span_id"])
+
+	// extractSpanMaps should then yield bare field names per span.
+	spans := extractSpanMaps(groups[0])
+	require.Len(t, spans, 2)
+	assert.Equal(t, "span-111", spans[0]["span_id"])
+	assert.Equal(t, "web.request", spans[0]["name"])
+	assert.Equal(t, "span-222", spans[1]["span_id"])
+	assert.Equal(t, "db.query", spans[1]["name"])
+}
+
+func TestCaptureRequestsBatchSplitMatchesIndependently(t *testing.T) {
+	t.Parallel()
+
+	// Receiver sends one batch with two trace groups; exporter sends each trace separately.
+	// Both should match against their respective receiver group.
+	svc, _ := newMetricsTestService("batch-split")
+	svc.retention = time.Minute
+
+	// Receiver: one HTTP request carrying two trace groups (canonical attributes, already field-mapped).
+	svc.translators[defaultTranslatorID] = staticTranslator{
+		name: defaultTranslatorID,
+		batch: []DecodedPayload{
+			{Signal: SignalTraces, Attributes: map[string]string{"trace_id": "trace-aaa", "span_id": "span-111"}, Format: "json"},
+			{Signal: SignalTraces, Attributes: map[string]string{"trace_id": "trace-bbb", "span_id": "span-333"}, Format: "json"},
+		},
+	}
+
+	recvReq := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/v0.4/traces", strings.NewReader("{}"))
+	payloads, results, anyMatched, err := svc.captureRequests(defaultPairID, defaultTranslatorID, "receiver", SignalTraces, ":8126", "/v0.4/traces", recvReq)
+	require.NoError(t, err)
+	require.Len(t, payloads, 2)
+	assert.False(t, anyMatched)
+	assert.Nil(t, results[0])
+	assert.Nil(t, results[1])
+
+	// Exporter sends trace-aaa alone (batch split: this is the first of two exporter requests).
+	svc.translators[defaultTranslatorID] = staticTranslator{
+		name: defaultTranslatorID,
+		batch: []DecodedPayload{
+			{Signal: SignalTraces, Attributes: map[string]string{"trace_id": "trace-aaa", "span_id": "span-111"}, Format: "json"},
+		},
+	}
+	expReqA := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/v0.4/traces", strings.NewReader("{}"))
+	pA, rA, matchedA, err := svc.captureRequests(defaultPairID, defaultTranslatorID, "exporter", SignalTraces, ":18081", "/v0.4/traces", expReqA)
+	require.NoError(t, err)
+	require.Len(t, pA, 1)
+	assert.True(t, matchedA, "trace-aaa should match receiver group 0")
+	require.NotNil(t, rA[0])
+
+	// Exporter sends trace-bbb alone (second exporter request from same original batch).
+	svc.translators[defaultTranslatorID] = staticTranslator{
+		name: defaultTranslatorID,
+		batch: []DecodedPayload{
+			{Signal: SignalTraces, Attributes: map[string]string{"trace_id": "trace-bbb", "span_id": "span-333"}, Format: "json"},
+		},
+	}
+	expReqB := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/v0.4/traces", strings.NewReader("{}"))
+	pB, rB, matchedB, err := svc.captureRequests(defaultPairID, defaultTranslatorID, "exporter", SignalTraces, ":18081", "/v0.4/traces", expReqB)
+	require.NoError(t, err)
+	require.Len(t, pB, 1)
+	assert.True(t, matchedB, "trace-bbb should match receiver group 1")
+	require.NotNil(t, rB[0])
+}
+
+func TestExtractIndexedGroupsLogsRootArray(t *testing.T) {
+	t.Parallel()
+
+	// Datadog log payloads are root-level JSON arrays; flat keys are [i].field.
+	flattened := map[string]string{
+		"[0].message":   "log entry A",
+		"[0].timestamp": "2025-01-01T00:00:00Z",
+		"[0].hostname":  "host-1",
+		"[1].message":   "log entry B",
+		"[1].timestamp": "2025-01-01T00:00:01Z",
+		"[1].hostname":  "host-2",
+	}
+
+	groups := extractIndexedGroups(flattened, "")
+	require.Len(t, groups, 2)
+	assert.Equal(t, "log entry A", groups[0]["message"])
+	assert.Equal(t, "host-1", groups[0]["hostname"])
+	assert.Equal(t, "log entry B", groups[1]["message"])
+	assert.Equal(t, "host-2", groups[1]["hostname"])
+}
+
+func TestCaptureRequestsLogBatchMergeMatchesPerCorrelationGroup(t *testing.T) {
+	t.Parallel()
+
+	// Receiver gets two separate log requests (two envoy UUIDs, no per-entry correlation_id
+	// in the log content itself — the receiver uses the header strategy).
+	// Exporter merges them into one request, with each entry carrying a correlation_id field.
+	// After grouping by per-entry correlation_id the exporter split matches each receiver batch.
+	svc, _ := newMetricsTestService("log-merge")
+	svc.retention = time.Minute
+
+	// Receiver batch 1: one payload (no per-entry correlation_id → kept as one batch).
+	svc.translators[defaultTranslatorID] = staticTranslator{
+		name: defaultTranslatorID,
+		batch: []DecodedPayload{
+			{Signal: SignalLogs, Attributes: map[string]string{"message": "msg-A", "hostname": "h1"}, Format: "json"},
+		},
+	}
+	recv1Req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/api/v2/logs", strings.NewReader("{}"))
+	recv1Req.Header.Set("X-Correlation-ID", "uuid-1")
+	p1, _, matched1, err := svc.captureRequests(defaultPairID, defaultTranslatorID, "receiver", SignalLogs, ":8126", "/api/v2/logs", recv1Req)
+	require.NoError(t, err)
+	require.Len(t, p1, 1)
+	assert.Equal(t, "logs:uuid-1", p1[0].correlation)
+	assert.False(t, matched1)
+
+	// Receiver batch 2: one payload.
+	svc.translators[defaultTranslatorID] = staticTranslator{
+		name: defaultTranslatorID,
+		batch: []DecodedPayload{
+			{Signal: SignalLogs, Attributes: map[string]string{"message": "msg-B", "hostname": "h2"}, Format: "json"},
+		},
+	}
+	recv2Req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/api/v2/logs", strings.NewReader("{}"))
+	recv2Req.Header.Set("X-Correlation-ID", "uuid-2")
+	p2, _, matched2, err := svc.captureRequests(defaultPairID, defaultTranslatorID, "receiver", SignalLogs, ":8126", "/api/v2/logs", recv2Req)
+	require.NoError(t, err)
+	require.Len(t, p2, 1)
+	assert.Equal(t, "logs:uuid-2", p2[0].correlation)
+	assert.False(t, matched2)
+
+	// Exporter sends merged batch: each entry carries its original correlation_id so the
+	// translator strategy produces the right per-group correlation.
+	svc.translators[defaultTranslatorID] = staticTranslator{
+		name: defaultTranslatorID,
+		batch: []DecodedPayload{
+			{Signal: SignalLogs, CorrelationID: "uuid-1", Attributes: map[string]string{"message": "msg-A", "correlation_id": "uuid-1", "hostname": "h1"}, Format: "json"},
+			{Signal: SignalLogs, CorrelationID: "uuid-2", Attributes: map[string]string{"message": "msg-B", "correlation_id": "uuid-2", "hostname": "h2"}, Format: "json"},
+		},
+	}
+	expReq := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/api/v2/logs", strings.NewReader("{}"))
+	expPayloads, expResults, anyMatched, err := svc.captureRequests(defaultPairID, defaultTranslatorID, "exporter", SignalLogs, ":18081", "/api/v2/logs", expReq)
+	require.NoError(t, err)
+	require.Len(t, expPayloads, 2)
+	assert.True(t, anyMatched, "both exporter groups should match their receiver batches")
+	require.NotNil(t, expResults[0])
+	require.NotNil(t, expResults[1])
+	assert.True(t, expResults[0].FullPayloadPassed, "uuid-1 group should pass")
+	assert.True(t, expResults[1].FullPayloadPassed, "uuid-2 group should pass")
 }
 
 func TestObserveDropsExpiredPendingWithoutFullShardGC(t *testing.T) {
@@ -1030,6 +1267,49 @@ func TestComparePairStripsCorrelationFromLogMessageJSON(t *testing.T) {
 
 	result := comparePair(receiver, exporter, Policy{})
 	assert.True(t, result.FullPayloadPassed, "expected full payload pass, got %#v", result)
+}
+
+func TestComparePairSpanMissingInExporterFailsFullPayloadPassed(t *testing.T) {
+	t.Parallel()
+
+	receiver := &observedPayload{
+		source:      "receiver",
+		signal:      "traces",
+		correlation: "abc",
+		receivedAt:  time.Now(),
+		flattened: map[string]string{
+			"trace_id": "t1",
+			"span_id":  "s1",
+		},
+		rawGroup: map[string]string{
+			"[0].span_id": "s1",
+			"[0].name":    "root",
+			"[1].span_id": "s2",
+			"[1].name":    "child",
+		},
+	}
+	exporter := &observedPayload{
+		source:      "exporter",
+		signal:      "traces",
+		correlation: "abc",
+		receivedAt:  time.Now(),
+		flattened: map[string]string{
+			"trace_id": "t1",
+			"span_id":  "s1",
+		},
+		rawGroup: map[string]string{
+			"[0].span_id": "s1",
+			"[0].name":    "root",
+		},
+	}
+
+	result := comparePair(receiver, exporter, Policy{})
+
+	assert.False(t, result.FullPayloadPassed)
+	require.Len(t, result.Spans, 2)
+	assert.Empty(t, result.Spans[0].OnlyIn)
+	assert.True(t, result.Spans[0].Passed)
+	assert.Equal(t, "receiver", result.Spans[1].OnlyIn)
 }
 
 func TestComparePairIgnoresCorrelationIDField(t *testing.T) {

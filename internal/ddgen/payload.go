@@ -198,9 +198,13 @@ func buildTracePayload(service, env, host, correlationID string) any {
 	now := time.Now()
 	start := now.Add(-250 * time.Millisecond).UnixNano()
 	duration := int64(250 * time.Millisecond)
-	traceID := randv2.Uint64() & 0x7fffffffffffffff      //nolint:gosec // synthetic test data, crypto/rand not needed
-	parentSpanID := randv2.Uint64() & 0x7fffffffffffffff //nolint:gosec // synthetic test data, crypto/rand not needed
-	childSpanID := randv2.Uint64() & 0x7fffffffffffffff  //nolint:gosec // synthetic test data, crypto/rand not needed
+	randID := func() uint64 { return randv2.Uint64() & 0x7fffffffffffffff } //nolint:gosec // synthetic test data
+	traceID := randID()
+	parentSpanID := randID()
+	authSpanID := randID()
+	cacheSpanID := randID()
+	dbSpanID := randID()
+	extSpanID := randID()
 
 	payload := [][]map[string]any{
 		{
@@ -225,7 +229,39 @@ func buildTracePayload(service, env, host, correlationID string) any {
 			{
 				"trace_id":  traceID,
 				"parent_id": parentSpanID,
-				"span_id":   childSpanID,
+				"span_id":   authSpanID,
+				"name":      "ddgen.auth.verify",
+				"resource":  "auth.verify_token",
+				"service":   service,
+				"status":    "Ok",
+				"type":      "custom",
+				"start":     start + int64(5*time.Millisecond),
+				"duration":  int64(15 * time.Millisecond),
+				"meta": map[string]any{
+					"env":  env,
+					"host": host,
+				},
+			},
+			{
+				"trace_id":  traceID,
+				"parent_id": parentSpanID,
+				"span_id":   cacheSpanID,
+				"name":      "ddgen.cache.get",
+				"resource":  "cache.get cart",
+				"service":   service,
+				"status":    "Ok",
+				"type":      "cache",
+				"start":     start + int64(20*time.Millisecond),
+				"duration":  int64(5 * time.Millisecond),
+				"meta": map[string]any{
+					"env":  env,
+					"host": host,
+				},
+			},
+			{
+				"trace_id":  traceID,
+				"parent_id": parentSpanID,
+				"span_id":   dbSpanID,
 				"name":      "ddgen.db.query",
 				"resource":  "SELECT * FROM orders",
 				"service":   service,
@@ -236,6 +272,23 @@ func buildTracePayload(service, env, host, correlationID string) any {
 				"meta": map[string]any{
 					"env":  env,
 					"host": host,
+				},
+			},
+			{
+				"trace_id":  traceID,
+				"parent_id": parentSpanID,
+				"span_id":   extSpanID,
+				"name":      "ddgen.http.client",
+				"resource":  "POST payment-svc /charge",
+				"service":   service,
+				"status":    "Ok",
+				"type":      "http",
+				"start":     start + int64(155*time.Millisecond),
+				"duration":  int64(80 * time.Millisecond),
+				"meta": map[string]any{
+					"env":              env,
+					"host":             host,
+					"http.status_code": "200",
 				},
 			},
 		},

@@ -42,10 +42,20 @@ type PayloadTranslator interface {
 	Decode(signal Signal, path, contentEncoding, contentType string, body []byte) DecodedPayload
 }
 
+// BatchDecoder is an optional extension of PayloadTranslator. When implemented, captureRequests
+// calls DecodeAll instead of Decode, receiving one DecodedPayload per natural item group
+// (one per trace group for traces, one per metric series for metrics). This lets a single
+// HTTP batch that is later fan-out by the collector still match item-by-item on the exporter side.
+type BatchDecoder interface {
+	PayloadTranslator
+	DecodeAll(signal Signal, path, contentEncoding, contentType string, body []byte) []DecodedPayload
+}
+
 type DecodedPayload struct {
 	Signal        Signal
 	CorrelationID string
 	Attributes    map[string]string
+	RawGroup      map[string]string // pre-mapping flat keys for this group (e.g. "[j].field"); used for span-level comparison
 	Format        string
 	DecodeError   string
 }
@@ -57,32 +67,127 @@ type datadogRawTranslator struct {
 func (datadogRawTranslator) Name() string { return defaultTranslatorID }
 
 func (t datadogRawTranslator) Decode(signal Signal, path, contentEncoding, contentType string, body []byte) DecodedPayload {
+	items := t.DecodeAll(signal, path, contentEncoding, contentType, body)
+	if len(items) > 0 {
+		return items[0]
+	}
+	return DecodedPayload{Signal: signal, Attributes: map[string]string{}, Format: "raw"}
+}
+
+// DecodeAll implements BatchDecoder. It decodes the body once, partitions the flat key map
+// into per-trace-group or per-metric-series slices, applies field mapping to each slice
+// independently, and returns one DecodedPayload per group. This lets a batch containing
+// multiple traces or metric series be matched item-by-item against exporter payloads.
+func (t datadogRawTranslator) DecodeAll(signal Signal, path, contentEncoding, contentType string, body []byte) []DecodedPayload {
 	decodedBody, format, err := decodeBody(body, path, contentEncoding, contentType)
 	if err != nil {
-		return DecodedPayload{
+		return []DecodedPayload{{
 			Signal:      signal,
 			Attributes:  map[string]string{},
 			Format:      "raw",
 			DecodeError: fmt.Sprintf("failed to decode payload: %v", err),
-		}
+		}}
 	}
 	canonicalSignal := signal
 	if canonicalSignal == SignalUnknown {
 		_, normalizedPath := parseExporterPath(path)
 		canonicalSignal = inferSignalFromDatadogPath(normalizedPath)
 	}
-	fields := t.mapping.MapForPath(canonicalSignal, path, flattenValueMap(decodedBody))
-	decodeError := ""
-	if len(fields) == 0 {
-		decodeError = "field mapping produced no canonical attributes"
+
+	rawFlat := flattenValueMap(decodedBody)
+	var rawGroups []map[string]string
+	switch canonicalSignal {
+	case SignalTraces:
+		// The Datadog Agent API for /v0.4/traces sends [[span,...],...]  — a root-level
+		// array of trace groups with no "traces" wrapper. The Datadog intake API (e.g.
+		// /api/v0.2/traces) wraps it as {"traces": [[span,...],...]}.
+		// Try the wrapped form first; fall back to root-level grouping when no "traces[" key exists.
+		if hasKeyPrefix(rawFlat, "traces[") {
+			rawGroups = extractIndexedGroups(rawFlat, "traces")
+		} else {
+			rawGroups = extractIndexedGroups(rawFlat, "")
+		}
+	case SignalMetrics:
+		rawGroups = extractIndexedGroups(rawFlat, "series")
+	case SignalLogs:
+		// Datadog log payloads are root-level JSON arrays: [{entry0}, {entry1}, ...].
+		// Flat keys are [i].field. Group entries by their per-entry correlation_id field so
+		// a collector-merged batch (entries from multiple receiver requests interleaved)
+		// is split into one payload per original batch, while a same-source batch (all entries
+		// sharing one correlation_id or with no per-entry id) stays together as one payload.
+		rawGroups = t.groupLogsByCorrelation(canonicalSignal, path, rawFlat)
+	default:
+		rawGroups = []map[string]string{rawFlat}
 	}
-	return DecodedPayload{
-		Signal:        canonicalSignal,
-		CorrelationID: fields["correlation_id"],
-		Attributes:    fields,
-		Format:        format,
-		DecodeError:   decodeError,
+
+	out := make([]DecodedPayload, 0, len(rawGroups))
+	for _, rawGroup := range rawGroups {
+		fields := t.mapping.MapForPath(canonicalSignal, path, rawGroup)
+		decodeError := ""
+		if len(fields) == 0 {
+			decodeError = "field mapping produced no canonical attributes"
+		}
+		dp := DecodedPayload{
+			Signal:        canonicalSignal,
+			CorrelationID: fields["correlation_id"],
+			Attributes:    fields,
+			Format:        format,
+			DecodeError:   decodeError,
+		}
+		if canonicalSignal == SignalTraces {
+			dp.RawGroup = rawGroup
+		}
+		out = append(out, dp)
 	}
+	return out
+}
+
+// groupLogsByCorrelation partitions a flat log batch by per-entry correlation_id.
+// Log payloads are root-level JSON arrays; raw keys are [i].field after flattening.
+// When all entries share the same correlation_id (or have none), the original flat map is
+// returned as-is so field mapping sees the full batch together. When entries from multiple
+// originating batches are interleaved (different correlation_ids), they are regrouped and
+// re-indexed so each group forms a coherent batch for independent matching.
+func (t datadogRawTranslator) groupLogsByCorrelation(signal Signal, path string, rawFlat map[string]string) []map[string]string {
+	entryGroups := extractIndexedGroups(rawFlat, "")
+	if len(entryGroups) <= 1 {
+		return []map[string]string{rawFlat}
+	}
+
+	type corrGroup struct{ entries []map[string]string }
+	byCorr := make(map[string]*corrGroup, len(entryGroups))
+	corrOrder := make([]string, 0, len(entryGroups))
+
+	for _, entry := range entryGroups {
+		fields := t.mapping.MapForPath(signal, path, entry)
+		corrID := fields["correlation_id"] // empty string if the entry has no correlation_id
+		if _, seen := byCorr[corrID]; !seen {
+			byCorr[corrID] = &corrGroup{}
+			corrOrder = append(corrOrder, corrID)
+		}
+		byCorr[corrID].entries = append(byCorr[corrID].entries, entry)
+	}
+
+	// All entries share one correlation_id (or all have none): keep the batch intact so
+	// field mapping accessors like "[0].field" work correctly on the original indices.
+	if len(byCorr) == 1 {
+		return []map[string]string{rawFlat}
+	}
+
+	// Multiple correlation groups: build a re-indexed combined raw map per group.
+	out := make([]map[string]string, 0, len(corrOrder))
+	for _, corrID := range corrOrder {
+		g := byCorr[corrID]
+		combined := make(map[string]string, len(g.entries)*8)
+		for i, entry := range g.entries {
+			prefix := fmt.Sprintf("[%d].", i)
+			for k, v := range entry {
+				combined[prefix+k] = v
+			}
+		}
+		out = append(out, combined)
+	}
+	return out
 }
 
 type PairConfig struct {
@@ -164,6 +269,7 @@ type observedPayload struct {
 	decodeError string
 	request     RequestSnapshot
 	flattened   map[string]string
+	rawGroup    map[string]string // pre-mapping flat keys for this group; used for span-level comparison
 }
 
 type ComparisonResult struct {
@@ -180,9 +286,26 @@ type ComparisonResult struct {
 	Mismatched        []AttributeDelta         `json:"mismatched,omitempty"`
 	MissingIn         []MissingField           `json:"missing_in,omitempty"`
 	RequiredChecks    []RequiredAttributeCheck `json:"required_checks,omitempty"`
+	Spans             []SpanComparison         `json:"spans,omitempty"`
 	ReceiverWire      RequestSnapshot          `json:"receiver_wire"`
 	ExporterWire      RequestSnapshot          `json:"exporter_wire"`
 	ComparedAt        time.Time                `json:"compared_at"`
+}
+
+type SpanComparison struct {
+	SpanID     string         `json:"span_id"`
+	Name       string         `json:"name,omitempty"`
+	OnlyIn     string         `json:"only_in,omitempty"` // "receiver" or "exporter" for unmatched spans
+	Matched    []string       `json:"matched,omitempty"`
+	Mismatched []SpanDelta    `json:"mismatched,omitempty"`
+	MissingIn  []MissingField `json:"missing_in,omitempty"`
+	Passed     bool           `json:"passed"`
+}
+
+type SpanDelta struct {
+	Attribute string `json:"attribute"`
+	Receiver  string `json:"receiver"`
+	Exporter  string `json:"exporter"`
 }
 
 type AttributeDelta struct {

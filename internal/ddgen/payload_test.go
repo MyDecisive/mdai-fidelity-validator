@@ -53,9 +53,10 @@ func TestBuildTraceRequestIncludesStatus(t *testing.T) {
 	var payload [][]map[string]any
 	require.NoError(t, json.Unmarshal(req.Body, &payload))
 	require.Len(t, payload, 1)
-	require.Len(t, payload[0], 2)
-	assert.Equal(t, "Ok", payload[0][0]["status"])
-	assert.Equal(t, "Ok", payload[0][1]["status"])
+	require.Len(t, payload[0], 5)
+	for _, span := range payload[0] {
+		assert.Equal(t, "Ok", span["status"])
+	}
 }
 
 func TestBuildLogsMsgpackRoundTrip(t *testing.T) {
