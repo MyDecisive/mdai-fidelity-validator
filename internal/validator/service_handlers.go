@@ -24,10 +24,9 @@ func (s *Service) handleResults(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	sh := s.getShard(correlationID)
-	sh.mu.Lock()
-	result, ok := sh.lastResult[correlationID]
-	sh.mu.Unlock()
+	s.stateMu.RLock()
+	result, ok := s.lastResults[correlationID]
+	s.stateMu.RUnlock()
 	if !ok {
 		http.Error(w, "result not found", http.StatusNotFound)
 		return
@@ -38,13 +37,11 @@ func (s *Service) handleResults(w http.ResponseWriter, r *http.Request) {
 
 func (s *Service) handleDebugPending(w http.ResponseWriter, _ *http.Request) {
 	var pending []DebugPayload
-	for _, sh := range s.shards {
-		sh.mu.Lock()
-		for _, payload := range sh.pending {
-			pending = append(pending, sanitizedDebugPayloadFromObserved(payload))
-		}
-		sh.mu.Unlock()
+	s.stateMu.RLock()
+	for _, payload := range s.pending {
+		pending = append(pending, sanitizedDebugPayloadFromObserved(payload))
 	}
+	s.stateMu.RUnlock()
 
 	slices.SortFunc(pending, func(a, b DebugPayload) int {
 		switch {
@@ -111,13 +108,11 @@ func (s *Service) handleDebugLastSignal(w http.ResponseWriter, r *http.Request) 
 
 func (s *Service) handleDebugResults(w http.ResponseWriter, _ *http.Request) {
 	var results []ComparisonResult
-	for _, sh := range s.shards {
-		sh.mu.Lock()
-		for _, result := range sh.lastResult {
-			results = append(results, sanitizedComparisonResult(result))
-		}
-		sh.mu.Unlock()
+	s.stateMu.RLock()
+	for _, result := range s.lastResults {
+		results = append(results, sanitizedComparisonResult(result))
 	}
+	s.stateMu.RUnlock()
 
 	slices.SortFunc(results, func(a, b ComparisonResult) int {
 		switch {

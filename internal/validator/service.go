@@ -19,8 +19,6 @@ import (
 	"go.uber.org/zap"
 )
 
-const numShards = 32
-
 const (
 	defaultPairID       = "default"
 	defaultTranslatorID = "datadog_raw"
@@ -30,12 +28,6 @@ const (
 	defaultConnection   = "default"
 	observePrefix       = "/observe"
 )
-
-type shard struct {
-	mu         sync.Mutex
-	pending    map[string]*observedPayload
-	lastResult map[string]ComparisonResult
-}
 
 type PayloadTranslator interface {
 	Name() string
@@ -206,11 +198,14 @@ type configuredPair struct {
 
 type Service struct {
 	logger     *zap.Logger
-	shards     []*shard
 	retention  time.Duration
 	connection string
 	policy     Policy
 	policyMu   sync.RWMutex
+
+	stateMu     sync.RWMutex
+	pending     map[string]*observedPayload
+	lastResults map[string]ComparisonResult
 
 	lastBySource sync.Map
 	lastByKey    sync.Map
@@ -359,10 +354,11 @@ func NewService(ctx context.Context, logger *zap.Logger, retention time.Duration
 
 	svc := &Service{
 		logger:      logger,
-		shards:      make([]*shard, numShards),
 		retention:   retention,
 		connection:  resolveConnectionName(),
 		policy:      policy,
+		pending:     make(map[string]*observedPayload),
+		lastResults: make(map[string]ComparisonResult),
 		defaultPair: defaultPairID,
 		translators: map[string]PayloadTranslator{
 			defaultTranslatorID: datadogRawTranslator{mapping: newMappingStore(fieldMap)},
@@ -416,12 +412,6 @@ func NewService(ctx context.Context, logger *zap.Logger, retention time.Duration
 		exporterAPIAddr: exporterAPIAddr,
 	}
 
-	for i := range numShards {
-		svc.shards[i] = &shard{
-			pending:    make(map[string]*observedPayload),
-			lastResult: make(map[string]ComparisonResult),
-		}
-	}
 	svc.startConfigReloader(ctx)
 	svc.startMaintenanceLoops(ctx)
 	return svc, nil
