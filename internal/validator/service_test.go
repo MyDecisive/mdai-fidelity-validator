@@ -70,8 +70,9 @@ func newMetricsTestService(connection string) (*Service, *prometheus.Registry) {
 
 	svc := &Service{
 		logger:        zap.NewNop(),
-		shards:        make([]*shard, numShards),
 		connection:    connection,
+		pending:       map[string]*observedPayload{},
+		lastResults:   map[string]ComparisonResult{},
 		translators:   map[string]PayloadTranslator{},
 		receivedTotal: receivedTotal,
 		attributeEval: attributeEval,
@@ -79,13 +80,6 @@ func newMetricsTestService(connection string) (*Service, *prometheus.Registry) {
 		requiredEval:  requiredEval,
 		requiredSig:   requiredSig,
 		pendingGauge:  pendingGauge,
-	}
-
-	for i := range numShards {
-		svc.shards[i] = &shard{
-			pending:    map[string]*observedPayload{},
-			lastResult: map[string]ComparisonResult{},
-		}
 	}
 
 	return svc, registry
@@ -822,11 +816,56 @@ func TestAdjustPendingTotalUsesConnectionLabel(t *testing.T) {
 	t.Parallel()
 
 	svc, registry := newMetricsTestService("shadow-c")
+	svc.stateMu.Lock()
 	svc.adjustPendingTotal(2)
+	svc.stateMu.Unlock()
 
 	assert.InDelta(t, float64(2), gaugeValue(t, svc.pendingGauge.WithLabelValues("shadow-c")), 0.000001)
 
 	requireMetricHasConnectionLabel(t, registry, "mdai_fidelity_pending_payloads", "shadow-c")
+}
+
+func TestObserveDoesNotOverwriteNewerResult(t *testing.T) {
+	t.Parallel()
+
+	svc, _ := newMetricsTestService("shadow-results")
+	svc.retention = time.Minute
+	correlationID := "logs:corr-1"
+	newer := ComparisonResult{
+		CorrelationID: correlationID,
+		ComparedAt:    time.Now().UTC().Add(time.Hour),
+		Passed:        true,
+	}
+
+	svc.stateMu.Lock()
+	svc.pending[correlationID] = &observedPayload{
+		source:      "receiver",
+		signal:      SignalLogs,
+		correlation: correlationID,
+		receivedAt:  time.Now().UTC(),
+		flattened:   map[string]string{"message": "old"},
+	}
+	svc.lastResults[correlationID] = newer
+	svc.stateMu.Unlock()
+	svc.pendingTotal.Store(1)
+	svc.pendingGauge.WithLabelValues("shadow-results").Set(1)
+
+	result, matched := svc.observe(&observedPayload{
+		source:      "exporter",
+		signal:      SignalLogs,
+		correlation: correlationID,
+		receivedAt:  time.Now().UTC(),
+		flattened:   map[string]string{"message": "new"},
+	})
+
+	require.True(t, matched)
+	require.NotNil(t, result)
+
+	svc.stateMu.RLock()
+	got := svc.lastResults[correlationID]
+	svc.stateMu.RUnlock()
+	assert.True(t, got.Passed)
+	assert.Equal(t, newer.ComparedAt, got.ComparedAt)
 }
 
 func TestExtractIndexedGroupsTraces(t *testing.T) {
@@ -1065,14 +1104,15 @@ func TestObserveDropsExpiredPendingWithoutFullShardGC(t *testing.T) {
 	svc.retention = time.Second
 
 	correlationID := "metrics:corr-1"
-	sh := svc.getShard(correlationID)
-	sh.pending[correlationID] = &observedPayload{
+	svc.stateMu.Lock()
+	svc.pending[correlationID] = &observedPayload{
 		source:      "receiver",
 		signal:      SignalMetrics,
 		correlation: correlationID,
 		receivedAt:  time.Now().Add(-2 * time.Second),
 		flattened:   map[string]string{"metric_name": "stale"},
 	}
+	svc.stateMu.Unlock()
 	svc.pendingTotal.Store(1)
 	svc.pendingGauge.WithLabelValues("shadow-expired").Set(1)
 
@@ -1091,26 +1131,29 @@ func TestObserveDropsExpiredPendingWithoutFullShardGC(t *testing.T) {
 	assert.InDelta(t, float64(1), gaugeValue(t, svc.pendingGauge.WithLabelValues("shadow-expired")), 0.000001)
 }
 
-func TestGCExpiredShardStateRemovesExpiredPendingAndUpdatesGauge(t *testing.T) {
+func TestGCExpiredStateRemovesExpiredPendingAndUpdatesGauge(t *testing.T) {
 	t.Parallel()
 
 	svc, _ := newMetricsTestService("shadow-gc")
 	svc.retention = time.Second
 
 	correlationID := "logs:corr-1"
-	sh := svc.getShard(correlationID)
-	sh.pending[correlationID] = &observedPayload{
+	svc.stateMu.Lock()
+	svc.pending[correlationID] = &observedPayload{
 		source:      "receiver",
 		signal:      SignalLogs,
 		correlation: correlationID,
 		receivedAt:  time.Now().Add(-2 * time.Second),
 	}
+	svc.stateMu.Unlock()
 	svc.pendingTotal.Store(1)
 	svc.pendingGauge.WithLabelValues("shadow-gc").Set(1)
 
-	svc.gcExpiredShardState(time.Now())
+	svc.gcExpiredState(time.Now())
 
-	assert.Empty(t, sh.pending)
+	svc.stateMu.RLock()
+	assert.Empty(t, svc.pending)
+	svc.stateMu.RUnlock()
 	assert.Equal(t, int64(0), svc.pendingTotal.Load())
 	assert.InDelta(t, float64(0), gaugeValue(t, svc.pendingGauge.WithLabelValues("shadow-gc")), 0.000001)
 }

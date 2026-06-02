@@ -3,44 +3,52 @@ package validator
 import (
 	"context"
 	"time"
-
-	"github.com/cespare/xxhash/v2"
 )
 
-func (s *Service) getShard(correlationID string) *shard {
-	index := int(xxhash.Sum64String(correlationID) % numShards) //nolint:gosec // modulo numShards ensures result fits in int
-	return s.shards[index]
-}
-
 func (s *Service) observe(payload *observedPayload) (*ComparisonResult, bool) {
-	now := time.Now().UTC()
-	sh := s.getShard(payload.correlation)
-	sh.mu.Lock()
-	defer sh.mu.Unlock()
-
 	s.rememberObserved(payload)
 
-	if existing, ok := sh.pending[payload.correlation]; ok {
+	existing, matched := s.extractPair(payload)
+	if !matched {
+		return nil, false
+	}
+
+	result := comparePair(existing, payload, s.currentPolicy())
+
+	s.stateMu.Lock()
+	existingResult, ok := s.lastResults[payload.correlation]
+	if ok && existingResult.ComparedAt.After(result.ComparedAt) {
+		s.stateMu.Unlock()
+		return &existingResult, true
+	}
+	s.lastResults[payload.correlation] = result
+	s.stateMu.Unlock()
+
+	s.recordMetrics(result)
+
+	return &result, true
+}
+
+func (s *Service) extractPair(payload *observedPayload) (*observedPayload, bool) {
+	now := time.Now().UTC()
+	s.stateMu.Lock()
+	defer s.stateMu.Unlock()
+
+	if existing, ok := s.pending[payload.correlation]; ok {
 		if now.Sub(existing.receivedAt) <= s.retention {
 			if existing.source == payload.source {
-				sh.pending[payload.correlation] = payload
+				s.pending[payload.correlation] = payload
 				return nil, false
 			}
-
-			delete(sh.pending, payload.correlation)
+			delete(s.pending, payload.correlation)
 			s.adjustPendingTotal(-1)
-
-			result := comparePair(existing, payload, s.currentPolicy())
-			sh.lastResult[payload.correlation] = result
-			s.recordMetrics(result)
-			return &result, true
+			return existing, true
 		}
-
-		delete(sh.pending, payload.correlation)
+		delete(s.pending, payload.correlation)
 		s.adjustPendingTotal(-1)
 	}
 
-	sh.pending[payload.correlation] = payload
+	s.pending[payload.correlation] = payload
 	s.adjustPendingTotal(1)
 	return nil, false
 }
@@ -48,22 +56,6 @@ func (s *Service) observe(payload *observedPayload) (*ComparisonResult, bool) {
 func (s *Service) rememberObserved(payload *observedPayload) {
 	s.lastBySource.Store(payload.source, payload)
 	s.lastByKey.Store(payload.source+":"+string(payload.signal), payload)
-}
-
-func (s *Service) gcShardLocked(sh *shard, now time.Time) int {
-	expiredPending := 0
-	for key, payload := range sh.pending {
-		if now.Sub(payload.receivedAt) > s.retention {
-			delete(sh.pending, key)
-			expiredPending++
-		}
-	}
-	for key, result := range sh.lastResult {
-		if now.Sub(result.ComparedAt) > s.retention {
-			delete(sh.lastResult, key)
-		}
-	}
-	return expiredPending
 }
 
 func (s *Service) adjustPendingTotal(delta int64) {
@@ -76,7 +68,7 @@ func (s *Service) adjustPendingTotal(delta int64) {
 }
 
 func (s *Service) startMaintenanceLoops(ctx context.Context) {
-	interval := shardGCInterval(s.retention)
+	interval := stateGCInterval(s.retention)
 	go func() {
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
@@ -85,25 +77,32 @@ func (s *Service) startMaintenanceLoops(ctx context.Context) {
 			case <-ctx.Done():
 				return
 			case now := <-ticker.C:
-				s.gcExpiredShardState(now.UTC())
+				s.gcExpiredState(now.UTC())
 			}
 		}
 	}()
 }
 
-func (s *Service) gcExpiredShardState(now time.Time) {
-	expiredPending := int64(0)
-	for _, sh := range s.shards {
-		sh.mu.Lock()
-		expiredPending += int64(s.gcShardLocked(sh, now))
-		sh.mu.Unlock()
+func (s *Service) gcExpiredState(now time.Time) {
+	s.stateMu.Lock()
+	for key, payload := range s.pending {
+		if now.Sub(payload.receivedAt) > s.retention {
+			delete(s.pending, key)
+		}
 	}
-	if expiredPending > 0 {
-		s.adjustPendingTotal(-expiredPending)
+	for key, result := range s.lastResults {
+		if now.Sub(result.ComparedAt) > s.retention {
+			delete(s.lastResults, key)
+		}
 	}
+	pending := int64(len(s.pending))
+	s.stateMu.Unlock()
+
+	s.pendingTotal.Store(pending)
+	s.pendingGauge.WithLabelValues(s.connection).Set(float64(pending))
 }
 
-func shardGCInterval(retention time.Duration) time.Duration {
+func stateGCInterval(retention time.Duration) time.Duration {
 	switch {
 	case retention <= 0:
 		return 5 * time.Second
