@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"testing"
 
+	dptrace "github.com/DataDog/datadog-agent/pkg/proto/pbgo/trace"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -60,6 +61,43 @@ func TestDatadogFieldMappingExtractsCorrelationFromTraceProto(t *testing.T) {
 	assert.Equal(t, "server.request", fields["operation"])
 }
 
+func TestDecodeBodyDatadogAgentPayloadProto(t *testing.T) {
+	t.Parallel()
+
+	inner := &dptrace.TracerPayload{
+		Chunks: []*dptrace.TraceChunk{
+			{
+				Spans: []*dptrace.Span{
+					{
+						TraceID:  12345,
+						SpanID:   67890,
+						Service:  "test-service",
+						Name:     "server.request",
+						Resource: "GET /api",
+					},
+				},
+			},
+		},
+	}
+	agentPayload := &dptrace.AgentPayload{
+		HostName:       "test-host",
+		Env:            "prod",
+		TracerPayloads: []*dptrace.TracerPayload{inner},
+	}
+	body, err := agentPayload.MarshalVT()
+	require.NoError(t, err)
+
+	payload, format, err := decodeBody(body, "/exporter/datadog/api/v0.2/traces", "", "application/x-protobuf")
+	require.NoError(t, err)
+	assert.Equal(t, "protobuf", format)
+
+	fields := flattenValueMap(payload)
+	assert.Equal(t, "12345", fields["traces[0][0].trace_id"])
+	assert.Equal(t, "67890", fields["traces[0][0].span_id"])
+	assert.Equal(t, "test-service", fields["traces[0][0].service"])
+	assert.Equal(t, "server.request", fields["traces[0][0].name"])
+}
+
 func gzipBytesFromBase64(t *testing.T, encoded string) []byte {
 	t.Helper()
 
@@ -92,4 +130,4 @@ func bodyFromDecoded(t *testing.T, decoded []byte) []byte {
 	return compressed.Bytes()
 }
 
-const datadogTraceProtoFixtureBase64 = "H4sIAAAAAAAE/7yUTWgkRRTHx82HsxUyJh13WUYjY4i762L3VvdMd1fvxfgRZUVZKPe0l6a66s2kSU1Vp6pm4txkb95EL34gCJ5FDyKsR0W8iCAYRMRj8CriVZDpjThoWBMP1qmq4fXj/3+//0OPD5iDfTbx7Q4Tet/nWkrgThs/FaRPUpLy1N/hpEi9eaUVXDlY2ljQTlZ+9O5S87724QJqCTEA5cdhXGDWZ17LghmDCQzsjcC69rIQA1CBgfrZ+fHTTz786LODr0eXv3n7vfe/+uHOnYvkrTd/PXz92w++u7D16uE7+/QiekAwx4QeBLZiKiiFtxalKY67uEeSmOAkIglJ6DpatWxYyVINgsqU2pRu4jXDAGOMMaYt1MyFCKpADL0zfo+eRyvagQysY25kc64FeGdu7NI9tCiEYwPrDbg2BiRzpVZ5Ka6B6BZZ2gU/wRn4vVD0fRL2Mz/LsgJ3kwwIEU9wbQxI5kqt8vJkNfQSWvlToTOMQy2R9NIuyUjcJb0ojeNeEod0DZ2tLdgtlfAW7zpL15HnQMIQnJkEVuwGig3Bu/9ZVntGEZoDNfbmBIxpiJZrzXWXvBReZ2rN7EnjLItjEfVjJsIiLuijaEWIoO5KweqR4eAtP799s3OV7wDf1SNHH0ar9V9lWRhmJn/rn6AW17M+epsgusW/GUk30EMCKqknQ1AuADUujVb1vdY3N9WziuZ3tHXeWak5k9PrrcdQO7dHGOTVEQa5YQ7ycbjaqM8vT946h1DudJVLGIP863MHnTumeqawmNuHov3awj84b15XDoxist26S7gogr0RmMkM4l98efDG7ds/f/wInoH9t59+P4L98++vHqPoeP5DkkU46pEkIyTCUZKFdP3e/F+YZWdppGwFvOyXIE4D0Hm0Uo/aOuZmQ3NvBMLTY3eS6Z84NpePYfjBl7df3H7mZudK5zl646WONgKMpXto8f8O/3/MR7HIR9bp4UYLNWf32sYaWpq+p1s5t8abny7Ap6dpeeHk2/3apaN9BK9U2jgw/nTqXEufa+VMWfg4CHtZgJ+q89TY3LreaDQajcbm1h8BAAD//wVjpnNEBgAA"
+const datadogTraceProtoFixtureBase64 = "H4sIAAAAAAAA/+KSTU8sSS1PrNQtzkhMyS/XTc7PyUlNLskv0i1JLS4RYkrPN+plktrAyMWXkpKemqdramiaZJCYlijEV5xaVJZapFeUWliaWlwixQuWh3EVbm/bsnb9rqtnSjXOzZy74PjNnTvVLBoaVmx8PP/5aXGHAy22QWZcfMn5RUWpOYklmfl58ZkpQiqpKcZJlubGqbpmBpapuiaGKWm6FoZplrqWlpZJBsZmlqkWFilRClyi8cWJuQU5mXnp8QVFmflFmSWV8WWGggxg8ME+ibk8NUkqAsPFHClJeoWlqUWVUhzBrj6uziEKhkjOPHz06qSmpucb5AwQDn4Cd/CCQ3JJbMmlxSX5uYAAAAD//2O77gIzAQAA"

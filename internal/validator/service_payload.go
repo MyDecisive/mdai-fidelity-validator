@@ -633,6 +633,12 @@ func decodeBody(body []byte, requestPath, contentEncoding, contentType string) (
 		return payload, format, nil
 	}
 
+	if strings.HasSuffix(requestPath, "/traces") {
+		if payload, err := decodeDatadogTraceMsgpack(requestPath, decoded); err == nil {
+			return payload, "msgpack", nil
+		}
+	}
+
 	var payload any
 	if err := msgpack.Unmarshal(decoded, &payload); err == nil {
 		return normalizeMsgpackValue(payload), "msgpack", nil
