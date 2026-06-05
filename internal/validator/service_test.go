@@ -275,7 +275,7 @@ func TestCorrelationCandidatesPreferCorrelationIDPaths(t *testing.T) {
 	assert.Contains(t, []string{"resource.correlation_id", "correlation_id"}, candidates[0])
 }
 
-func TestCorrelationCandidatesTracesPreferSpanIDOverTraceIDOverCorrelationID(t *testing.T) {
+func TestCorrelationCandidatesTracesPreferTraceIDOverSpanIDOverCorrelationID(t *testing.T) {
 	t.Parallel()
 
 	fields := map[string]string{
@@ -286,8 +286,8 @@ func TestCorrelationCandidatesTracesPreferSpanIDOverTraceIDOverCorrelationID(t *
 
 	candidates := correlationCandidates(SignalTraces, fields)
 	require.GreaterOrEqual(t, len(candidates), 3)
-	assert.Equal(t, "span_id", candidates[0])
-	assert.Equal(t, "trace_id", candidates[1])
+	assert.Equal(t, "trace_id", candidates[0])
+	assert.Equal(t, "span_id", candidates[1])
 	assert.Equal(t, "correlation_id", candidates[2])
 }
 
@@ -310,7 +310,7 @@ func TestCorrelationCandidatesTracesUseSuffixFallback(t *testing.T) {
 	assert.Equal(t, "[0][0].meta.correlation_id", candidates[2])
 }
 
-func TestResolveCorrelationIDFromDecodedTracesPreferSpanID(t *testing.T) {
+func TestResolveCorrelationIDFromDecodedTracesPreferTraceID(t *testing.T) {
 	t.Parallel()
 
 	fields := map[string]string{
@@ -319,11 +319,12 @@ func TestResolveCorrelationIDFromDecodedTracesPreferSpanID(t *testing.T) {
 		"correlation_id": "corr-xyz",
 	}
 
-	// Even when the translator extracted a correlation_id, traces should prefer span_id.
+	// Even when the translator extracted a correlation_id, traces should prefer trace_id
+	// because it is stable across span reordering within a trace group.
 	res := resolveCorrelationIDFromDecoded(SignalTraces, "corr-xyz", fields, http.Header{}, nil)
-	assert.Equal(t, "traces:span-abc", res.CorrelationID)
+	assert.Equal(t, "traces:trace-def", res.CorrelationID)
 	assert.Equal(t, "field", res.Strategy)
-	assert.Equal(t, "span_id", res.Field)
+	assert.Equal(t, "trace_id", res.Field)
 }
 
 func TestInferSignalFromDatadogPath(t *testing.T) {
