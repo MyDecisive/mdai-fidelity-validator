@@ -33,13 +33,16 @@ func logCorrelationDecision(s *Service, source string, signal Signal, decision c
 }
 
 func logObservedPayload(s *Service, payload *observedPayload) {
-	s.logger.Info("captured payload",
+	fields := []zap.Field{
 		zap.String("source", payload.source),
 		zap.String("signal", string(payload.signal)),
 		zap.String("correlation_id", payload.correlation),
 		zap.String("format", payload.format),
-		zap.String("decode_error", payload.decodeError),
-	)
+	}
+	if payload.decodeError != "" {
+		fields = append(fields, zap.String("decode_error", payload.decodeError))
+	}
+	s.logger.Info("captured payload", fields...)
 	if ce := s.logger.Check(zap.DebugLevel, "captured payload detail"); ce != nil {
 		debug := sanitizedDebugPayloadFromObserved(payload)
 		body, err := json.Marshal(debug)

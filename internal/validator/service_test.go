@@ -295,7 +295,8 @@ func TestCorrelationCandidatesTracesUseSuffixFallback(t *testing.T) {
 	t.Parallel()
 
 	// When canonical keys are absent (no field mapping applied), suffix scans should
-	// still respect span_id > trace_id > correlation_id ordering.
+	// prefer trace_id over span_id: all spans share the same trace_id so it is
+	// stable regardless of span ordering within the chunk.
 	fields := map[string]string{
 		"[0][0].span_id":             "span-111",
 		"[0][0].trace_id":            "trace-222",
@@ -304,8 +305,8 @@ func TestCorrelationCandidatesTracesUseSuffixFallback(t *testing.T) {
 
 	candidates := correlationCandidates(SignalTraces, fields)
 	require.GreaterOrEqual(t, len(candidates), 3)
-	assert.Equal(t, "[0][0].span_id", candidates[0])
-	assert.Equal(t, "[0][0].trace_id", candidates[1])
+	assert.Equal(t, "[0][0].trace_id", candidates[0])
+	assert.Equal(t, "[0][0].span_id", candidates[1])
 	assert.Equal(t, "[0][0].meta.correlation_id", candidates[2])
 }
 

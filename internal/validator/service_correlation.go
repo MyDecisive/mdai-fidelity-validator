@@ -177,14 +177,16 @@ func correlationCandidates(signal Signal, fields map[string]string) []string {
 		for _, key := range []string{"span_id", "trace_id", "correlation_id"} {
 			add(key)
 		}
-		// Suffix fallbacks for unmapped traces fields, respecting the same priority.
+		// Suffix fallbacks for grouped trace payloads (fields like "[0].trace_id").
+		// trace_id is preferred over span_id here: all spans in a group share the same
+		// trace_id, so it is stable regardless of span ordering within the chunk.
 		for _, key := range keys {
-			if strings.HasSuffix(strings.ToLower(key), ".span_id") {
+			if strings.HasSuffix(strings.ToLower(key), ".trace_id") {
 				add(key)
 			}
 		}
 		for _, key := range keys {
-			if strings.HasSuffix(strings.ToLower(key), ".trace_id") {
+			if strings.HasSuffix(strings.ToLower(key), ".span_id") {
 				add(key)
 			}
 		}
