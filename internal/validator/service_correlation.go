@@ -171,10 +171,10 @@ func correlationCandidates(signal Signal, fields map[string]string) []string {
 	}
 
 	// Exact canonical key priority differs by signal.
-	// Traces: span_id > trace_id > correlation_id.
+	// Traces: trace_id > span_id > correlation_id.
 	// Others: correlation_id > trace_id.
 	if signal == SignalTraces {
-		for _, key := range []string{"span_id", "trace_id", "correlation_id"} {
+		for _, key := range []string{"trace_id", "span_id", "correlation_id"} {
 			add(key)
 		}
 		// Suffix fallbacks for grouped trace payloads (fields like "[0].trace_id").
