@@ -128,6 +128,7 @@ func (s *Service) captureRequests(pairID, translatorID, source string, signal Si
 			request:     snapshot,
 			flattened:   fields,
 			rawGroup:    decoded.RawGroup,
+			spans:       decoded.Spans,
 		}
 		logCorrelationDecision(s, source, signal, correlationDecision)
 		logObservedPayload(s, observed)

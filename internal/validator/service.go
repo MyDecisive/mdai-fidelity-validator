@@ -47,7 +47,8 @@ type DecodedPayload struct {
 	Signal        Signal
 	CorrelationID string
 	Attributes    map[string]string
-	RawGroup      map[string]string // pre-mapping flat keys for this group (e.g. "[j].field"); used for span-level comparison
+	RawGroup      map[string]string // pre-mapping flat keys for this group (e.g. "[j].field")
+	Spans         []map[string]string
 	Format        string
 	DecodeError   string
 }
@@ -114,6 +115,14 @@ func (t datadogRawTranslator) DecodeAll(signal Signal, path, contentEncoding, co
 
 	out := make([]DecodedPayload, 0, len(rawGroups))
 	for _, rawGroup := range rawGroups {
+		var spans []map[string]string
+		if canonicalSignal == SignalTraces {
+			group := sortedTraceGroup(rawGroup)
+			spans = group.spans
+			if len(group.spans) > 1 {
+				rawGroup = group.flatten()
+			}
+		}
 		fields := t.mapping.MapForPath(canonicalSignal, path, rawGroup)
 		decodeError := ""
 		if len(fields) == 0 {
@@ -128,6 +137,7 @@ func (t datadogRawTranslator) DecodeAll(signal Signal, path, contentEncoding, co
 		}
 		if canonicalSignal == SignalTraces {
 			dp.RawGroup = rawGroup
+			dp.Spans = spans
 		}
 		out = append(out, dp)
 	}
@@ -264,7 +274,8 @@ type observedPayload struct {
 	decodeError string
 	request     RequestSnapshot
 	flattened   map[string]string
-	rawGroup    map[string]string // pre-mapping flat keys for this group; used for span-level comparison
+	rawGroup    map[string]string // pre-mapping flat keys for this group
+	spans       []map[string]string
 }
 
 type ComparisonResult struct {
