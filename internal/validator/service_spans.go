@@ -3,6 +3,7 @@ package validator
 import (
 	"cmp"
 	"fmt"
+	"maps"
 	"slices"
 	"strconv"
 	"strings"
@@ -119,9 +120,7 @@ func newTraceGroup(rawGroup map[string]string) traceGroup {
 
 func (g traceGroup) flatten() map[string]string {
 	result := make(map[string]string, len(g.extra)+len(g.spans)*8)
-	for k, v := range g.extra {
-		result[k] = v
-	}
+	maps.Copy(result, g.extra)
 	for i, span := range g.spans {
 		prefix := fmt.Sprintf("[%d].", i)
 		for k, v := range span {
