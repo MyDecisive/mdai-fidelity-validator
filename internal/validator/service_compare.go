@@ -29,20 +29,7 @@ func comparePair(a, b *observedPayload, policy Policy) ComparisonResult {
 		ComparedAt:        time.Now().UTC(),
 	}
 
-	allKeysMap := make(map[string]struct{}, len(receiverCompareFields)+len(exporterCompareFields))
-	for key := range receiverCompareFields {
-		allKeysMap[key] = struct{}{}
-	}
-	for key := range exporterCompareFields {
-		allKeysMap[key] = struct{}{}
-	}
-
-	allKeys := make([]string, 0, len(allKeysMap))
-	for key := range allKeysMap {
-		allKeys = append(allKeys, key)
-	}
-	slices.Sort(allKeys)
-
+	allKeys := mergeAndSortKeys(receiverCompareFields, exporterCompareFields)
 	for _, key := range allKeys {
 		receiverValue, receiverOK := receiverCompareFields[key]
 		exporterValue, exporterOK := exporterCompareFields[key]
@@ -72,8 +59,8 @@ func comparePair(a, b *observedPayload, policy Policy) ComparisonResult {
 	}
 
 	result.AttributeTotal = len(allKeys)
-	if result.Signal == SignalTraces && (receiver.rawGroup != nil || exporter.rawGroup != nil) {
-		result.Spans = compareSpans(receiver.rawGroup, exporter.rawGroup)
+	if result.Signal == SignalTraces && (receiver.spans != nil || exporter.spans != nil) {
+		result.Spans = compareSpans(receiver.spans, exporter.spans)
 	}
 	spansMatch := true
 	for _, s := range result.Spans {
@@ -87,6 +74,23 @@ func comparePair(a, b *observedPayload, policy Policy) ComparisonResult {
 		spansMatch // spans good
 	result.RequiredChecks, result.Passed = evaluatePolicy(result.Signal, receiver.flattened, exporter.flattened, policy)
 	return result
+}
+
+func mergeAndSortKeys(a, b map[string]string) []string {
+	allKeys := make(map[string]struct{}, len(a)+len(b))
+	for key := range a {
+		allKeys[key] = struct{}{}
+	}
+	for key := range b {
+		allKeys[key] = struct{}{}
+	}
+
+	keys := make([]string, 0, len(allKeys))
+	for key := range allKeys {
+		keys = append(keys, key)
+	}
+	slices.Sort(keys)
+	return keys
 }
 
 func normalizeFieldsForComparison(signal Signal, fields map[string]string) map[string]string {

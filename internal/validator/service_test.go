@@ -955,8 +955,8 @@ func TestDecodeAllTracesUnwrappedFormat(t *testing.T) {
 	assert.Equal(t, "trace-aaa", groups[0]["[1].trace_id"])
 	assert.Equal(t, "span-222", groups[0]["[1].span_id"])
 
-	// extractSpanMaps should then yield bare field names per span.
-	spans := extractSpanMaps(groups[0])
+	// newTraceGroup should then yield bare field names per span.
+	spans := newTraceGroup(groups[0]).spans
 	require.Len(t, spans, 2)
 	assert.Equal(t, "span-111", spans[0]["span_id"])
 	assert.Equal(t, "web.request", spans[0]["name"])
@@ -1314,6 +1314,133 @@ func TestComparePairStripsCorrelationFromLogMessageJSON(t *testing.T) {
 	assert.True(t, result.FullPayloadPassed, "expected full payload pass, got %#v", result)
 }
 
+func TestSortSpansByID(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		rawGroup map[string]string
+		want     map[string]string
+	}{
+		{
+			name: "sorts numeric span IDs ascending",
+			rawGroup: map[string]string{
+				"[0].span_id": "300",
+				"[0].name":    "third",
+				"[1].span_id": "100",
+				"[1].name":    "first",
+				"[2].span_id": "200",
+				"[2].name":    "second",
+			},
+			want: map[string]string{
+				"[0].span_id": "100",
+				"[0].name":    "first",
+				"[1].span_id": "200",
+				"[1].name":    "second",
+				"[2].span_id": "300",
+				"[2].name":    "third",
+			},
+		},
+		{
+			name: "preserves non-indexed keys",
+			rawGroup: map[string]string{
+				"[0].span_id":     "200",
+				"[1].span_id":     "100",
+				"top-level-value": "kept",
+			},
+			want: map[string]string{
+				"[0].span_id":     "100",
+				"[1].span_id":     "200",
+				"top-level-value": "kept",
+			},
+		},
+		{
+			name: "sorts numeric IDs before non-numeric IDs",
+			rawGroup: map[string]string{
+				"[0].span_id": "10abc",
+				"[0].name":    "non-numeric",
+				"[1].span_id": "9",
+				"[1].name":    "numeric-nine",
+				"[2].span_id": "10",
+				"[2].name":    "numeric-ten",
+			},
+			want: map[string]string{
+				"[0].span_id": "9",
+				"[0].name":    "numeric-nine",
+				"[1].span_id": "10",
+				"[1].name":    "numeric-ten",
+				"[2].span_id": "10abc",
+				"[2].name":    "non-numeric",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			got := sortSpansByID(tt.rawGroup)
+
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func TestComparePairReorderedSpansNoTopLevelMismatch(t *testing.T) {
+	setDefaultFieldMappingPath(t)
+	mapping, _, err := loadFieldMapping()
+	require.NoError(t, err)
+	translator := datadogRawTranslator{mapping: newMappingStore(mapping)}
+
+	receiverDecoded := translator.Decode(SignalTraces, "/api/v0.4/traces", "", "application/json", []byte(`[
+		[
+			{"trace_id":"t1","span_id":"100","name":"root","service":"svc","meta":{"correlation_id":"traces:t1"}},
+			{"trace_id":"t1","span_id":"200","name":"child","service":"svc","meta":{"correlation_id":"traces:t1"}}
+		]
+	]`))
+	exporterDecoded := translator.Decode(SignalTraces, "/api/v0.4/traces", "", "application/json", []byte(`[
+		[
+			{"trace_id":"t1","span_id":"200","name":"child","service":"svc","meta":{"correlation_id":"traces:t1"}},
+			{"trace_id":"t1","span_id":"100","name":"root","service":"svc","meta":{"correlation_id":"traces:t1"}}
+		]
+	]`))
+	require.Empty(t, receiverDecoded.DecodeError)
+	require.Empty(t, exporterDecoded.DecodeError)
+	assert.Equal(t, "100", receiverDecoded.Attributes["span_id"])
+	assert.Equal(t, "100", exporterDecoded.Attributes["span_id"])
+	assert.Equal(t, "root", receiverDecoded.Attributes["operation"])
+	assert.Equal(t, "root", exporterDecoded.Attributes["operation"])
+
+	receiver := &observedPayload{
+		source:      "receiver",
+		signal:      receiverDecoded.Signal,
+		correlation: receiverDecoded.CorrelationID,
+		receivedAt:  time.Now(),
+		flattened:   receiverDecoded.Attributes,
+		rawGroup:    receiverDecoded.RawGroup,
+		spans:       receiverDecoded.Spans,
+	}
+	exporter := &observedPayload{
+		source:      "exporter",
+		signal:      exporterDecoded.Signal,
+		correlation: exporterDecoded.CorrelationID,
+		receivedAt:  time.Now(),
+		flattened:   exporterDecoded.Attributes,
+		rawGroup:    exporterDecoded.RawGroup,
+		spans:       exporterDecoded.Spans,
+	}
+
+	result := comparePair(receiver, exporter, Policy{})
+
+	assert.True(t, result.FullPayloadPassed, "span reordering should not cause top-level mismatches; got: %v", result.Mismatched)
+	assert.Empty(t, result.Mismatched)
+	require.Len(t, result.Spans, 2)
+	for _, s := range result.Spans {
+		assert.True(t, s.Passed, "span %s should pass", s.SpanID)
+		assert.Empty(t, s.OnlyIn)
+	}
+}
+
 func TestComparePairSpanMissingInExporterFailsFullPayloadPassed(t *testing.T) {
 	t.Parallel()
 
@@ -1332,6 +1459,10 @@ func TestComparePairSpanMissingInExporterFailsFullPayloadPassed(t *testing.T) {
 			"[1].span_id": "s2",
 			"[1].name":    "child",
 		},
+		spans: []map[string]string{
+			{"span_id": "s1", "name": "root"},
+			{"span_id": "s2", "name": "child"},
+		},
 	}
 	exporter := &observedPayload{
 		source:      "exporter",
@@ -1345,6 +1476,9 @@ func TestComparePairSpanMissingInExporterFailsFullPayloadPassed(t *testing.T) {
 		rawGroup: map[string]string{
 			"[0].span_id": "s1",
 			"[0].name":    "root",
+		},
+		spans: []map[string]string{
+			{"span_id": "s1", "name": "root"},
 		},
 	}
 
