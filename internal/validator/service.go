@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -95,7 +96,14 @@ func (t datadogRawTranslator) DecodeAll(signal Signal, path, contentEncoding, co
 		// array of trace groups with no "traces" wrapper. The Datadog intake API (e.g.
 		// /api/v0.2/traces) wraps it as {"traces": [[span,...],...]}.
 		// Try the wrapped form first; fall back to root-level grouping when no "traces[" key exists.
-		if hasKeyPrefix(rawFlat, "traces[") {
+		hasWrappedTraces := false
+		for key := range rawFlat {
+			if strings.HasPrefix(key, "traces[") {
+				hasWrappedTraces = true
+				break
+			}
+		}
+		if hasWrappedTraces {
 			rawGroups = extractIndexedGroups(rawFlat, "traces")
 		} else {
 			rawGroups = extractIndexedGroups(rawFlat, "")
@@ -117,7 +125,8 @@ func (t datadogRawTranslator) DecodeAll(signal Signal, path, contentEncoding, co
 	for _, rawGroup := range rawGroups {
 		var spans []map[string]string
 		if canonicalSignal == SignalTraces {
-			group := sortedTraceGroup(rawGroup)
+			group := newTraceGroup(rawGroup)
+			slices.SortStableFunc(group.spans, compareSpanIDs)
 			spans = group.spans
 			if len(group.spans) > 1 {
 				rawGroup = group.flatten()

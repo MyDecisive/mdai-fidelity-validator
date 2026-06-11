@@ -15,23 +15,6 @@ type correlationResolution struct {
 	RawValue      string
 }
 
-func firstNonEmpty(values ...string) string {
-	for _, value := range values {
-		if strings.TrimSpace(value) != "" {
-			return value
-		}
-	}
-	return ""
-}
-
-func deriveCorrelationFromFields(signal Signal, fields map[string]string) string {
-	correlationID, _, _, ok := deriveCorrelationFromFieldsDetailed(signal, fields)
-	if !ok {
-		return ""
-	}
-	return correlationID
-}
-
 func deriveCorrelationFromFieldsDetailed(signal Signal, fields map[string]string) (string, string, string, bool) {
 	for _, key := range correlationCandidates(signal, fields) {
 		if candidate := correlationValueForField(key, fields[key]); candidate != "" {
@@ -44,7 +27,7 @@ func deriveCorrelationFromFieldsDetailed(signal Signal, fields map[string]string
 func resolveCorrelationIDFromDecoded(signal Signal, translatorCorrelationID string, fields map[string]string, headers http.Header, body []byte) correlationResolution {
 	translatorCorrelationID = strings.TrimSpace(translatorCorrelationID)
 	if signal == SignalTraces {
-		// For traces, prefer span_id > trace_id > correlation_id from intrinsic fields before falling back to headers.
+		// For traces, prefer trace_id > span_id > correlation_id from intrinsic fields before falling back to headers.
 		if correlationID, field, rawValue, ok := deriveCorrelationFromFieldsDetailed(signal, fields); ok {
 			return correlationResolution{
 				CorrelationID: correlationID,
