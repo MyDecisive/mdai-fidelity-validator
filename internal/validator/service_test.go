@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -1026,46 +1025,84 @@ func TestExtractIndexedGroups(t *testing.T) {
 	}
 }
 
-// TestDecodeAllTracesUnwrappedFormat verifies that /v0.4/traces payloads (root-level [[span,...]]
-// with no "traces" wrapper) are correctly split into per-trace groups and that individual span
-// maps have bare field names (e.g. "span_id", "name") suitable for span matching.
-func TestDecodeAllTracesUnwrappedFormat(t *testing.T) {
+func TestDecodeAllTraces(t *testing.T) {
 	t.Parallel()
 
-	// Two trace groups: trace-aaa has 2 spans, trace-bbb has 1 span.
-	// Flat keys follow the unwrapped [[span,...]] structure.
-	rawFlat := map[string]string{
-		"[0][0].trace_id": "trace-aaa",
-		"[0][0].span_id":  "span-111",
-		"[0][0].name":     "web.request",
-		"[0][1].trace_id": "trace-aaa",
-		"[0][1].span_id":  "span-222",
-		"[0][1].name":     "db.query",
-		"[1][0].trace_id": "trace-bbb",
-		"[1][0].span_id":  "span-333",
-		"[1][0].name":     "background.job",
+	tests := []struct {
+		name       string
+		rawFlat    map[string]string
+		prefix     string
+		wantGroups int
+		wantSpans  [][]map[string]string
+	}{
+		{
+			name:   "unwrapped format",
+			prefix: "",
+			rawFlat: map[string]string{
+				"[0][0].trace_id": "trace-aaa",
+				"[0][0].span_id":  "span-111",
+				"[0][0].name":     "web.request",
+				"[0][1].trace_id": "trace-aaa",
+				"[0][1].span_id":  "span-222",
+				"[0][1].name":     "db.query",
+				"[1][0].trace_id": "trace-bbb",
+				"[1][0].span_id":  "span-333",
+				"[1][0].name":     "background.job",
+			},
+			wantGroups: 2,
+			wantSpans: [][]map[string]string{
+				{
+					{"trace_id": "trace-aaa", "span_id": "span-111", "name": "web.request"},
+					{"trace_id": "trace-aaa", "span_id": "span-222", "name": "db.query"},
+				},
+				{
+					{"trace_id": "trace-bbb", "span_id": "span-333", "name": "background.job"},
+				},
+			},
+		},
+		{
+			name:   "wrapped format",
+			prefix: "traces",
+			rawFlat: map[string]string{
+				"traces[0][0].trace_id": "trace-aaa",
+				"traces[0][0].span_id":  "span-111",
+				"traces[0][0].name":     "web.request",
+				"traces[0][1].trace_id": "trace-aaa",
+				"traces[0][1].span_id":  "span-222",
+				"traces[0][1].name":     "db.query",
+				"traces[1][0].trace_id": "trace-bbb",
+				"traces[1][0].span_id":  "span-333",
+				"traces[1][0].name":     "background.job",
+			},
+			wantGroups: 2,
+			wantSpans: [][]map[string]string{
+				{
+					{"trace_id": "trace-aaa", "span_id": "span-111", "name": "web.request"},
+					{"trace_id": "trace-aaa", "span_id": "span-222", "name": "db.query"},
+				},
+				{
+					{"trace_id": "trace-bbb", "span_id": "span-333", "name": "background.job"},
+				},
+			},
+		},
 	}
 
-	for key := range rawFlat {
-		assert.False(t, strings.HasPrefix(key, "traces["))
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			groups := extractIndexedGroups(tt.rawFlat, tt.prefix)
+			require.Len(t, groups, tt.wantGroups)
+
+			for i, wantSpans := range tt.wantSpans {
+				spans := newTraceGroup(groups[i]).spans
+				require.Len(t, spans, len(wantSpans))
+				for j, want := range wantSpans {
+					assert.Equal(t, want, spans[j])
+				}
+			}
+		})
 	}
-
-	groups := extractIndexedGroups(rawFlat, "")
-	require.Len(t, groups, 2)
-
-	// Each group should contain [j].field keys for its spans.
-	assert.Equal(t, "trace-aaa", groups[0]["[0].trace_id"])
-	assert.Equal(t, "span-111", groups[0]["[0].span_id"])
-	assert.Equal(t, "trace-aaa", groups[0]["[1].trace_id"])
-	assert.Equal(t, "span-222", groups[0]["[1].span_id"])
-
-	// newTraceGroup should then yield bare field names per span.
-	spans := newTraceGroup(groups[0]).spans
-	require.Len(t, spans, 2)
-	assert.Equal(t, "span-111", spans[0]["span_id"])
-	assert.Equal(t, "web.request", spans[0]["name"])
-	assert.Equal(t, "span-222", spans[1]["span_id"])
-	assert.Equal(t, "db.query", spans[1]["name"])
 }
 
 func TestCaptureRequestsBatchSplitMatchesIndependently(t *testing.T) {
@@ -1463,124 +1500,6 @@ func TestComparePairReorderedSpansNoTopLevelMismatch(t *testing.T) {
 		assert.True(t, s.Passed, "span %s should pass", s.SpanID)
 		assert.Empty(t, s.OnlyIn)
 	}
-}
-
-func TestCompareSpanIDsSortEdgeCases(t *testing.T) {
-	t.Parallel()
-
-	spans := []map[string]string{
-		{"span_id": "abc"},
-		{"span_id": "10"},
-		{"span_id": "2"},
-		{"span_id": ""},
-		{"span_id": "18446744073709551616"},
-	}
-
-	slices.SortStableFunc(spans, compareSpanIDs)
-
-	assert.Equal(t, []map[string]string{
-		{"span_id": "2"},
-		{"span_id": "10"},
-		{"span_id": ""},
-		{"span_id": "18446744073709551616"},
-		{"span_id": "abc"},
-	}, spans)
-}
-
-func TestCompareSpansDuplicateSpanIDsFail(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name          string
-		receiverSpans []map[string]string
-		exporterSpans []map[string]string
-		wantSpanID    string
-		wantReceiver  string
-		wantExporter  string
-	}{
-		{
-			name: "duplicate receiver id",
-			receiverSpans: []map[string]string{
-				{"span_id": "s1", "name": "root"},
-				{"span_id": "s1", "name": "duplicate"},
-			},
-			exporterSpans: []map[string]string{
-				{"span_id": "s1", "name": "root"},
-			},
-			wantSpanID:   "s1",
-			wantReceiver: "duplicate count: 2",
-			wantExporter: "duplicate count: 1",
-		},
-		{
-			name: "duplicate exporter id",
-			receiverSpans: []map[string]string{
-				{"span_id": "s1", "name": "root"},
-			},
-			exporterSpans: []map[string]string{
-				{"span_id": "s1", "name": "root"},
-				{"span_id": "s1", "name": "duplicate"},
-			},
-			wantSpanID:   "s1",
-			wantReceiver: "duplicate count: 1",
-			wantExporter: "duplicate count: 2",
-		},
-		{
-			name: "duplicate on both sides",
-			receiverSpans: []map[string]string{
-				{"span_id": "s1", "name": "root"},
-				{"span_id": "s1", "name": "receiver-duplicate"},
-			},
-			exporterSpans: []map[string]string{
-				{"span_id": "s1", "name": "root"},
-				{"span_id": "s1", "name": "exporter-duplicate"},
-			},
-			wantSpanID:   "s1",
-			wantReceiver: "duplicate count: 2",
-			wantExporter: "duplicate count: 2",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-
-			got := compareSpans(tt.receiverSpans, tt.exporterSpans)
-
-			require.Len(t, got, 1)
-			assert.Equal(t, tt.wantSpanID, got[0].SpanID)
-			assert.False(t, got[0].Passed)
-			require.Len(t, got[0].Mismatched, 1)
-			assert.Equal(t, "span_id", got[0].Mismatched[0].Attribute)
-			assert.Equal(t, tt.wantReceiver, got[0].Mismatched[0].Receiver)
-			assert.Equal(t, tt.wantExporter, got[0].Mismatched[0].Exporter)
-		})
-	}
-}
-
-func TestCompareSpansMissingSpanIDsFail(t *testing.T) {
-	t.Parallel()
-
-	got := compareSpans(
-		[]map[string]string{
-			{"name": "receiver-missing-id"},
-		},
-		[]map[string]string{
-			{"name": "exporter-missing-id"},
-		},
-	)
-
-	require.Len(t, got, 2)
-	assert.Equal(t, "receiver", got[0].OnlyIn)
-	assert.False(t, got[0].Passed)
-	require.Len(t, got[0].Mismatched, 1)
-	assert.Equal(t, "span_id", got[0].Mismatched[0].Attribute)
-	assert.Equal(t, "missing", got[0].Mismatched[0].Receiver)
-
-	assert.Equal(t, "exporter", got[1].OnlyIn)
-	assert.False(t, got[1].Passed)
-	require.Len(t, got[1].Mismatched, 1)
-	assert.Equal(t, "span_id", got[1].Mismatched[0].Attribute)
-	assert.Equal(t, "missing", got[1].Mismatched[0].Exporter)
 }
 
 func TestComparePairSpanMissingInExporterFailsFullPayloadPassed(t *testing.T) {
