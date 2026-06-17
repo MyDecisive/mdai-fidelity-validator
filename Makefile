@@ -27,11 +27,19 @@ build: tidy vendor
 
 .PHONY: test
 test: tidy vendor
+ifdef TEST
+	$(GO_TEST) -run ^$(TEST)$$ ./...
+else
 	$(GO_TEST) ./...
+endif
 
 .PHONY: testv
 testv: tidy vendor
+ifdef TEST
+	$(GO_TEST) -run ^$(TEST)$$ -v ./...
+else
 	$(GO_TEST) -v ./...
+endif
 
 .PHONY: cover
 cover: tidy vendor
