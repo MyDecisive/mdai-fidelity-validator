@@ -309,7 +309,6 @@ type ComparisonResult struct {
 
 type SpanComparison struct {
 	SpanID     string         `json:"span_id"`
-	Name       string         `json:"name,omitempty"`
 	OnlyIn     string         `json:"only_in,omitempty"` // "receiver" or "exporter" for unmatched spans
 	Matched    []string       `json:"matched,omitempty"`
 	Mismatched []SpanDelta    `json:"mismatched,omitempty"`
