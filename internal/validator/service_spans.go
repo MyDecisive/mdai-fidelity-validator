@@ -10,10 +10,8 @@ import (
 
 const (
 	spanKeyID    = "span_id"
-	spanKeyName  = "name"
 	receiverSide = "receiver"
 	exporterSide = "exporter"
-	missing      = "missing"
 )
 
 // compareSpans matches parsed receiver/exporter spans by span_id and returns one
