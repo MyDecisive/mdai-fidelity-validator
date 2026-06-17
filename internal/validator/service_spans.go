@@ -201,7 +201,8 @@ func (g traceGroup) flatten() map[string]string {
 }
 
 func compareSpanIDs(a map[string]string,
-	b map[string]string) int {
+	b map[string]string,
+) int {
 	aID, aErr := strconv.ParseUint(a[spanKeyID], 10, 64)
 	bID, bErr := strconv.ParseUint(b[spanKeyID], 10, 64)
 	aNumeric := aErr == nil
@@ -221,7 +222,8 @@ func compareSpanIDs(a map[string]string,
 
 func diffSpanPair(spanID string,
 	receiverSpans map[string]string,
-	exporterSpans map[string]string) SpanComparison {
+	exporterSpans map[string]string,
+) SpanComparison {
 	result := SpanComparison{
 		SpanID: spanID,
 	}
