@@ -196,7 +196,7 @@ func marshal(payload any, encoding Encoding) ([]byte, error) {
 
 func buildTracePayload(service, env, host, correlationID string) any {
 	now := time.Now()
-	start := now.Add(-250 * time.Millisecond).UnixNano()
+	startNano := now.Add(-250 * time.Millisecond).UnixNano()
 	duration := int64(250 * time.Millisecond)
 	randID := func() uint64 { return randv2.Uint64() & 0x7fffffffffffffff } //nolint:gosec // synthetic test data
 	traceID := randID()
@@ -216,7 +216,7 @@ func buildTracePayload(service, env, host, correlationID string) any {
 				"service":  service,
 				"status":   "Ok",
 				"type":     "web",
-				"start":    start,
+				"start":    startNano,
 				"duration": duration,
 				"meta": map[string]any{
 					"env":  env,
@@ -235,7 +235,7 @@ func buildTracePayload(service, env, host, correlationID string) any {
 				"service":   service,
 				"status":    "Ok",
 				"type":      "custom",
-				"start":     start + int64(5*time.Millisecond),
+				"start":     startNano + int64(5*time.Millisecond),
 				"duration":  int64(15 * time.Millisecond),
 				"meta": map[string]any{
 					"env":  env,
@@ -251,7 +251,7 @@ func buildTracePayload(service, env, host, correlationID string) any {
 				"service":   service,
 				"status":    "Ok",
 				"type":      "cache",
-				"start":     start + int64(20*time.Millisecond),
+				"start":     startNano + int64(20*time.Millisecond),
 				"duration":  int64(5 * time.Millisecond),
 				"meta": map[string]any{
 					"env":  env,
@@ -267,7 +267,7 @@ func buildTracePayload(service, env, host, correlationID string) any {
 				"service":   service,
 				"status":    "Ok",
 				"type":      "sql",
-				"start":     start + int64(50*time.Millisecond),
+				"start":     startNano + int64(50*time.Millisecond),
 				"duration":  int64(100 * time.Millisecond),
 				"meta": map[string]any{
 					"env":  env,
@@ -283,7 +283,7 @@ func buildTracePayload(service, env, host, correlationID string) any {
 				"service":   service,
 				"status":    "Ok",
 				"type":      "http",
-				"start":     start + int64(155*time.Millisecond),
+				"start":     startNano + int64(155*time.Millisecond),
 				"duration":  int64(80 * time.Millisecond),
 				"meta": map[string]any{
 					"env":              env,

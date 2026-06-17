@@ -95,13 +95,13 @@ func deriveFingerprintCorrelationID(signal Signal, fields map[string]string) str
 	}
 
 	builder := strings.Builder{}
-	builder.WriteString(string(signal))
+	_, _ = builder.WriteString(string(signal))
 
 	foundIdentity := false
 	if keys, ok := identityFields[signal]; ok {
 		for _, key := range keys {
 			if val, ok := fields[key]; ok && val != "" {
-				builder.WriteString("|" + key + "=" + val)
+				_, _ = builder.WriteString("|" + key + "=" + val)
 				foundIdentity = true
 			}
 		}
@@ -119,7 +119,7 @@ func deriveFingerprintCorrelationID(signal Signal, fields map[string]string) str
 			for _, fieldKey := range keys {
 				val := fields[fieldKey]
 				if strings.Contains(fieldKey, "tags") && strings.Contains(val, tag+":") {
-					builder.WriteString("|" + fieldKey + "=" + val)
+					_, _ = builder.WriteString("|" + fieldKey + "=" + val)
 				}
 			}
 		}
