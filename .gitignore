@@ -2,3 +2,5 @@ vendor
 .idea
 /mdai-fidelity-validator
 /ddmltgen
+coverage.html
+coverage.out
