@@ -94,7 +94,13 @@ func sortFieldCandidates(candidates []string) {
 }
 
 func fieldCandidateDepth(value string) int {
-	return strings.Count(value, ".") + strings.Count(value, "[")
+	depth := 0
+	for i := range len(value) {
+		if value[i] == '.' || value[i] == '[' {
+			depth++
+		}
+	}
+	return depth
 }
 
 func applyFieldOp(value, op string) (string, bool) {

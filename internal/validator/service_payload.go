@@ -21,9 +21,12 @@ import (
 	"go.uber.org/zap"
 )
 
-const maxDecompressedSize = 50 << 20 // 50MB decompressed cap to prevent zip-bomb OOM
+const (
+	maxRequestBodySize  = 10 << 20 // 10MB request cap before decompression.
+	maxDecompressedSize = 50 << 20 // 50MB decompressed cap to prevent zip-bomb OOM.
+)
 
-var selectedHeaderkeys = [...]string{ //nolint:gochecknoglobals
+var selectedHeaderKeys = [...]string{ //nolint:gochecknoglobals
 	"Content-Type",
 	"Content-Encoding",
 	"User-Agent",
@@ -48,7 +51,7 @@ var selectedHeaderkeys = [...]string{ //nolint:gochecknoglobals
 // collector still match the correct receiver item by natural ID (trace_id, series fingerprint)
 // rather than by the HTTP-request-level correlation header.
 func (s *Service) captureRequests(pairID, translatorID, source string, signal Signal, listener, requestPath string, r *http.Request) ([]*observedPayload, []*ComparisonResult, bool, error) {
-	body, err := io.ReadAll(http.MaxBytesReader(noopResponseWriter{}, r.Body, 10<<20))
+	body, err := io.ReadAll(http.MaxBytesReader(noopResponseWriter{}, r.Body, maxRequestBodySize))
 	if err != nil {
 		return nil, nil, false, fmt.Errorf("failed to read body: %w", err)
 	}
@@ -106,7 +109,9 @@ func (s *Service) captureRequests(pairID, translatorID, source string, signal Si
 		}
 		decodeError := decoded.DecodeError
 		if err := validateCanonicalAttributes(fields); err != nil {
-			decodeError = firstNonEmpty(decodeError, fmt.Sprintf("invalid canonical attributes: %v", err))
+			if strings.TrimSpace(decodeError) == "" {
+				decodeError = fmt.Sprintf("invalid canonical attributes: %v", err)
+			}
 		}
 
 		correlationDecision := resolveCorrelationIDFromDecoded(effectiveSignal, decoded.CorrelationID, fields, r.Header, body)
@@ -348,7 +353,7 @@ func (p configuredPair) shouldIgnorePath(source, rawPath string) bool {
 }
 
 func requestPortCandidates(r *http.Request, listener string) []string {
-	candidates := make([]string, 0, 5)
+	var candidates []string
 	appendCandidate := func(raw string) {
 		if port, ok := canonicalPort(raw); ok {
 			if slices.Contains(candidates, port) {
@@ -379,12 +384,12 @@ func canonicalPort(raw string) (string, bool) {
 	if value == "" {
 		return "", false
 	}
-	if _, err := strconv.Atoi(value); err == nil {
+	if isDecimalPort(value) {
 		return value, true
 	}
 	if host, port, err := net.SplitHostPort(value); err == nil {
 		_ = host
-		if _, err := strconv.Atoi(port); err == nil {
+		if isDecimalPort(port) {
 			return port, true
 		}
 	}
@@ -436,15 +441,6 @@ func (s *Service) captureDatadogAPIRequest(listener string, r *http.Request) {
 	s.rememberObserved(observed)
 }
 
-func hasKeyPrefix(m map[string]string, prefix string) bool {
-	for k := range m {
-		if strings.HasPrefix(k, prefix) {
-			return true
-		}
-	}
-	return false
-}
-
 // extractIndexedGroups partitions a flat attribute map by the leading array index of a named
 // top-level key (e.g. "traces" or "series"). Keys whose prefix is "<name>[i]" are grouped under
 // index i with the "<name>[i]" prefix stripped, so each group looks like a standalone payload.
@@ -494,39 +490,53 @@ func extractIndexedGroups(flattened map[string]string, name string) []map[string
 	return out
 }
 
+func readRequestPath(r *http.Request) string {
+	requestPath := r.URL.Path
+	if requestPath == "" {
+		return "/"
+	}
+	return requestPath
+}
+
 func flattenValueMap(payload any) map[string]string {
 	result := make(map[string]string)
-	flattenValue(result, "", payload)
+	flattenValue(result, nil, payload)
 	return result
 }
 
-func flattenValue(result map[string]string, prefix string, value any) {
+func flattenValue(result map[string]string, keyPath []byte, value any) {
 	switch typed := value.(type) {
 	case map[string]any:
 		for key, val := range typed {
-			next := key
-			if prefix != "" {
-				next = prefix + "." + key
+			baseLen := len(keyPath)
+			if baseLen > 0 {
+				keyPath = append(keyPath, '.')
 			}
-			flattenValue(result, next, val)
+			keyPath = append(keyPath, key...)
+			flattenValue(result, keyPath, val)
+			keyPath = keyPath[:baseLen]
 		}
 	case []any:
 		for index, item := range typed {
-			next := prefix + "[" + strconv.Itoa(index) + "]"
-			flattenValue(result, next, item)
+			baseLen := len(keyPath)
+			keyPath = append(keyPath, '[')
+			keyPath = strconv.AppendInt(keyPath, int64(index), 10)
+			keyPath = append(keyPath, ']')
+			flattenValue(result, keyPath, item)
+			keyPath = keyPath[:baseLen]
 		}
 	case string:
-		result[prefix] = typed
+		result[string(keyPath)] = typed
 	case json.Number:
-		result[prefix] = typed.String()
+		result[string(keyPath)] = typed.String()
 	case float64:
-		result[prefix] = strconv.FormatFloat(typed, 'f', -1, 64)
+		result[string(keyPath)] = strconv.FormatFloat(typed, 'f', -1, 64)
 	case bool:
-		result[prefix] = strconv.FormatBool(typed)
+		result[string(keyPath)] = strconv.FormatBool(typed)
 	case nil:
-		result[prefix] = "null"
+		result[string(keyPath)] = "null"
 	default:
-		result[prefix] = fmt.Sprintf("%v", typed)
+		result[string(keyPath)] = fmt.Sprintf("%v", typed)
 	}
 }
 
@@ -568,12 +578,14 @@ func parseExporterPath(rawPath string) (string, string) {
 
 	if segments[0] == strings.TrimPrefix(observePrefix, "/") && len(segments) >= 3 && segments[1] == "exporter" {
 		for i := 2; i < len(segments); i++ {
-			if isDatadogAPIPrefixSegment(segments[i]) {
+			switch strings.ToLower(strings.TrimSpace(segments[i])) {
+			case "api", "v0.2", "v0.3", "v0.4", "v0.5", "v1", "v2":
 				if i == 2 {
 					return "", "/" + strings.Join(segments[i:], "/")
 				}
 				exporter = strings.ToLower(strings.TrimSpace(segments[i-1]))
 				return exporter, "/" + strings.Join(segments[i:], "/")
+			default:
 			}
 		}
 		return "", normalizedPath
@@ -585,15 +597,6 @@ func parseExporterPath(rawPath string) (string, string) {
 	default:
 		exporter = strings.ToLower(strings.TrimSpace(segments[0]))
 		return exporter, "/" + strings.Join(segments[1:], "/")
-	}
-}
-
-func isDatadogAPIPrefixSegment(segment string) bool {
-	switch strings.ToLower(strings.TrimSpace(segment)) {
-	case "api", "v0.2", "v0.3", "v0.4", "v0.5", "v1", "v2":
-		return true
-	default:
-		return false
 	}
 }
 
@@ -709,11 +712,17 @@ func normalizeMsgpackValue(value any) any {
 }
 
 func looksLikeJSON(body []byte) bool {
-	trimmed := bytes.TrimSpace(body)
-	if len(trimmed) == 0 {
-		return false
+	for _, b := range body {
+		switch b {
+		case ' ', '\n', '\r', '\t':
+			continue
+		case '{', '[':
+			return true
+		default:
+			return false
+		}
 	}
-	return trimmed[0] == '{' || trimmed[0] == '['
+	return false
 }
 
 func isGzip(body []byte) bool {
@@ -742,7 +751,7 @@ func inflate(body []byte) ([]byte, error) {
 
 func selectedHeaders(header http.Header) map[string]string {
 	out := make(map[string]string)
-	for _, key := range selectedHeaderkeys {
+	for _, key := range selectedHeaderKeys {
 		if value := header.Get(key); value != "" {
 			out[key] = value
 		}

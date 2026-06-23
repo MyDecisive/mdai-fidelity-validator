@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -95,7 +97,14 @@ func (t datadogRawTranslator) DecodeAll(signal Signal, path, contentEncoding, co
 		// array of trace groups with no "traces" wrapper. The Datadog intake API (e.g.
 		// /api/v0.2/traces) wraps it as {"traces": [[span,...],...]}.
 		// Try the wrapped form first; fall back to root-level grouping when no "traces[" key exists.
-		if hasKeyPrefix(rawFlat, "traces[") {
+		hasWrappedTraces := false
+		for key := range rawFlat {
+			if strings.HasPrefix(key, "traces[") {
+				hasWrappedTraces = true
+				break
+			}
+		}
+		if hasWrappedTraces {
 			rawGroups = extractIndexedGroups(rawFlat, "traces")
 		} else {
 			rawGroups = extractIndexedGroups(rawFlat, "")
@@ -117,7 +126,8 @@ func (t datadogRawTranslator) DecodeAll(signal Signal, path, contentEncoding, co
 	for _, rawGroup := range rawGroups {
 		var spans []map[string]string
 		if canonicalSignal == SignalTraces {
-			group := sortedTraceGroup(rawGroup)
+			group := newTraceGroup(rawGroup)
+			slices.SortStableFunc(group.spans, compareSpanIDs)
 			spans = group.spans
 			if len(group.spans) > 1 {
 				rawGroup = group.flatten()
@@ -300,7 +310,6 @@ type ComparisonResult struct {
 
 type SpanComparison struct {
 	SpanID     string         `json:"span_id"`
-	Name       string         `json:"name,omitempty"`
 	OnlyIn     string         `json:"only_in,omitempty"` // "receiver" or "exporter" for unmatched spans
 	Matched    []string       `json:"matched,omitempty"`
 	Mismatched []SpanDelta    `json:"mismatched,omitempty"`
@@ -559,4 +568,9 @@ func resolveConnectionName() string {
 		return defaultConnection
 	}
 	return connectionName
+}
+
+func isDecimalPort(value string) bool {
+	port, err := strconv.Atoi(value)
+	return err == nil && port >= 0 && port <= 65535 && strconv.Itoa(port) == value
 }

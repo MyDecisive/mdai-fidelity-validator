@@ -202,7 +202,10 @@ func (s *Service) handleDatadogValidate(w http.ResponseWriter, r *http.Request) 
 }
 
 func (s *Service) handleExporterAPI(w http.ResponseWriter, r *http.Request) {
-	path := readRequestPath(r)
+	path := r.URL.Path
+	if path == "" {
+		path = "/"
+	}
 	_, normalizedPath := parseExporterPath(path)
 	signal := inferSignalFromDatadogPath(normalizedPath)
 	pair := s.resolvePairForRequest(r, "exporter", ":18081")
@@ -217,7 +220,10 @@ func (s *Service) handleExporterAPI(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Service) handleProxyIngest(w http.ResponseWriter, r *http.Request) {
-	path := readRequestPath(r)
+	path := r.URL.Path
+	if path == "" {
+		path = "/"
+	}
 	signal := inferSignalFromDatadogPath(path)
 	pair := s.resolvePairForRequest(r, "receiver", ":8126")
 	if pair.shouldIgnorePath("receiver", path) {
@@ -263,7 +269,11 @@ func (s *Service) handleSource(source string) http.HandlerFunc {
 		if source == "exporter" {
 			translator = pair.ExporterTranslator
 		}
-		payloads, results, anyMatched, err := s.captureRequests(pair.ID, translator, source, Signal(signal), "admin", readRequestPath(r), r)
+		path := r.URL.Path
+		if path == "" {
+			path = "/"
+		}
+		payloads, results, anyMatched, err := s.captureRequests(pair.ID, translator, source, Signal(signal), "admin", path, r)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
@@ -326,13 +336,6 @@ func trimSyntheticSourcePath(rawPath, source string) (string, bool) {
 		return "", false
 	}
 	return trimmed, true
-}
-
-func readRequestPath(r *http.Request) string {
-	if r.URL.Path == "" {
-		return "/"
-	}
-	return r.URL.Path
 }
 
 func mustReadBodyBytes(s *Service, r *http.Request) []byte {

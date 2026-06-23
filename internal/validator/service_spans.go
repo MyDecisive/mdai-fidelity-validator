@@ -4,51 +4,121 @@ import (
 	"cmp"
 	"fmt"
 	"maps"
-	"slices"
 	"strconv"
 	"strings"
 )
 
+const (
+	spanKeyID    = "span_id"
+	receiverSide = "receiver"
+	exporterSide = "exporter"
+)
+
 // compareSpans matches parsed receiver/exporter spans by span_id and returns one
-// SpanComparison per matched or unmatched span.
+// SpanComparison per matched, unmatched, or invalid span identity.
 func compareSpans(receiverSpans, exporterSpans []map[string]string) []SpanComparison {
-	expByID := make(map[string]map[string]string, len(exporterSpans))
-	for _, span := range exporterSpans {
-		if id := span["span_id"]; id != "" {
-			expByID[id] = span
-		}
-	}
+	receiverSpansBySpanID := groupSpansByID(receiverSpans)
+	exporterSpansBySpanID := groupSpansByID(exporterSpans)
+	processedSpanIDs := make(map[string]struct{}, len(receiverSpansBySpanID)+len(exporterSpansBySpanID))
+	results := make([]SpanComparison, 0, len(receiverSpans)+len(exporterSpans))
 
-	matchedIDs := make(map[string]struct{}, len(receiverSpans))
-	results := make([]SpanComparison, 0, len(receiverSpans))
-
-	for _, recvSpan := range receiverSpans {
-		id := recvSpan["span_id"]
-		expSpan, found := expByID[id]
-		if !found {
-			results = append(results, SpanComparison{
-				SpanID: id,
-				Name:   recvSpan["name"],
-				OnlyIn: "receiver",
-			})
+	for _, receiverSpan := range receiverSpans {
+		spanID := receiverSpan[spanKeyID]
+		// span has no ID; cannot be matched or correlated
+		if spanID == "" {
+			spanComparison := SpanComparison{
+				MissingIn: []MissingField{
+					{Attribute: spanKeyID, Side: receiverSide},
+				},
+				Passed: false,
+			}
+			results = append(results, spanComparison)
 			continue
 		}
-		matchedIDs[id] = struct{}{}
-		results = append(results, diffSpanPair(id, recvSpan, expSpan))
+		// skip already processed span IDs to avoid double-reporting
+		// spans already handled as matched pairs or duplicates
+		if _, seen := processedSpanIDs[spanID]; seen {
+			continue
+		}
+		// ambiguous identity — multiple spans share this ID on at least one side
+		if isDuplicateSpanID(spanID, receiverSpansBySpanID, exporterSpansBySpanID) {
+			results = append(results, SpanComparison{
+				SpanID: spanID,
+				Mismatched: []SpanDelta{
+					{
+						Attribute: spanKeyID,
+						Receiver:  fmt.Sprintf("span count: %d", len(receiverSpansBySpanID[spanID])),
+						Exporter:  fmt.Sprintf("span count: %d", len(exporterSpansBySpanID[spanID])),
+					},
+				},
+				Passed: false,
+			})
+			processedSpanIDs[spanID] = struct{}{}
+			continue
+		}
+
+		// no matching span on exporter side
+		if len(exporterSpansBySpanID[spanID]) == 0 {
+			results = append(results, SpanComparison{
+				SpanID: spanID,
+				OnlyIn: receiverSide,
+			})
+			processedSpanIDs[spanID] = struct{}{}
+			continue
+		}
+
+		// matched pair; report field-level differences
+		results = append(results, diffSpanPair(spanID, receiverSpan, exporterSpansBySpanID[spanID][0]))
+		processedSpanIDs[spanID] = struct{}{}
 	}
 
-	for _, expSpan := range exporterSpans {
-		id := expSpan["span_id"]
-		if _, ok := matchedIDs[id]; !ok {
-			results = append(results, SpanComparison{
-				SpanID: id,
-				Name:   expSpan["name"],
-				OnlyIn: "exporter",
-			})
+	for _, exporterSpan := range exporterSpans {
+		spanID := exporterSpan[spanKeyID]
+		// span has no ID; cannot be matched or correlated
+		if spanID == "" {
+			spanComparison := SpanComparison{
+				MissingIn: []MissingField{
+					{Attribute: spanKeyID, Side: exporterSide},
+				},
+				Passed: false,
+			}
+			results = append(results, spanComparison)
+			continue
 		}
+		// skip already processed span IDs to avoid double-reporting
+		// spans already handled as matched pairs or duplicates
+		if _, seen := processedSpanIDs[spanID]; seen {
+			continue
+		}
+		// matched pair; report field-level differences
+		results = append(results, SpanComparison{
+			SpanID: spanID,
+			OnlyIn: exporterSide,
+		})
+		processedSpanIDs[spanID] = struct{}{}
 	}
 
 	return results
+}
+
+func groupSpansByID(spans []map[string]string) map[string][]map[string]string {
+	byID := make(map[string][]map[string]string, len(spans))
+	for _, span := range spans {
+		// spans with no span_id are excluded; they're reported separately as invalid
+		if spanID := span[spanKeyID]; spanID != "" {
+			byID[spanID] = append(byID[spanID], span)
+		}
+	}
+	return byID
+}
+
+func isDuplicateSpanID(
+	id string,
+	receiverSpansBySpanID map[string][]map[string]string,
+	exporterSpansBySpanID map[string][]map[string]string,
+) bool {
+	// absent keys return nil slices; len(nil) == 0, so this is safe
+	return len(receiverSpansBySpanID[id]) > 1 || len(exporterSpansBySpanID[id]) > 1
 }
 
 // spanSkipKeys lists raw span fields excluded from comparison because they carry no fidelity
@@ -130,24 +200,11 @@ func (g traceGroup) flatten() map[string]string {
 	return result
 }
 
-func sortSpansByID(rawGroup map[string]string) map[string]string {
-	group := sortedTraceGroup(rawGroup)
-	if len(group.spans) <= 1 {
-		return rawGroup
-	}
-
-	return group.flatten()
-}
-
-func sortedTraceGroup(rawGroup map[string]string) traceGroup {
-	group := newTraceGroup(rawGroup)
-	slices.SortStableFunc(group.spans, compareSpanIDs)
-	return group
-}
-
-func compareSpanIDs(a, b map[string]string) int {
-	aID, aErr := strconv.ParseUint(a["span_id"], 10, 64)
-	bID, bErr := strconv.ParseUint(b["span_id"], 10, 64)
+func compareSpanIDs(a map[string]string,
+	b map[string]string,
+) int {
+	aID, aErr := strconv.ParseUint(a[spanKeyID], 10, 64)
+	bID, bErr := strconv.ParseUint(b[spanKeyID], 10, 64)
 	aNumeric := aErr == nil
 	bNumeric := bErr == nil
 
@@ -159,42 +216,44 @@ func compareSpanIDs(a, b map[string]string) int {
 	case bNumeric:
 		return 1
 	default:
-		return strings.Compare(a["span_id"], b["span_id"])
+		return strings.Compare(a[spanKeyID], b[spanKeyID])
 	}
 }
 
-func diffSpanPair(spanID string, recv, exp map[string]string) SpanComparison {
+func diffSpanPair(spanID string,
+	receiverSpans map[string]string,
+	exporterSpans map[string]string,
+) SpanComparison {
 	result := SpanComparison{
 		SpanID: spanID,
-		Name:   recv["name"],
 	}
 
-	for _, key := range mergeAndSortKeys(recv, exp) {
+	for _, key := range mergeAndSortKeys(receiverSpans, exporterSpans) {
 		if _, skip := spanSkipKeys[key]; skip {
 			continue
 		}
-		recvVal, recvOK := recv[key]
-		expVal, expOK := exp[key]
+		receiverValue, receiverValueExists := receiverSpans[key]
+		exporterValue, exporterValueExists := exporterSpans[key]
 		switch {
-		case recvOK && expOK && recvVal == expVal:
+		case receiverValueExists && exporterValueExists && receiverValue == exporterValue:
 			result.Matched = append(result.Matched, key)
-		case recvOK && expOK:
+		case receiverValueExists && exporterValueExists:
 			result.Mismatched = append(result.Mismatched, SpanDelta{
 				Attribute: key,
-				Receiver:  recvVal,
-				Exporter:  expVal,
+				Receiver:  receiverValue,
+				Exporter:  exporterValue,
 			})
-		case recvOK:
+		case receiverValueExists:
 			result.MissingIn = append(result.MissingIn, MissingField{
 				Attribute: key,
-				Side:      "exporter",
-				Value:     recvVal,
+				Side:      exporterSide,
+				Value:     receiverValue,
 			})
 		default:
 			result.MissingIn = append(result.MissingIn, MissingField{
 				Attribute: key,
-				Side:      "receiver",
-				Value:     expVal,
+				Side:      receiverSide,
+				Value:     exporterValue,
 			})
 		}
 	}

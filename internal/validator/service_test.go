@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -85,33 +84,44 @@ func newMetricsTestService(connection string) (*Service, *prometheus.Registry) {
 	return svc, registry
 }
 
-func requireMetricHasConnectionLabel(t *testing.T, registry *prometheus.Registry, metricName, connection string) {
+func requireMetricsHaveLabels(t *testing.T, registry *prometheus.Registry, metricNames []string, labels map[string]string) {
 	t.Helper()
 
 	families, err := registry.Gather()
 	require.NoError(t, err)
 
+	familiesByName := make(map[string]*dto.MetricFamily, len(families))
 	for _, family := range families {
-		if family.GetName() != metricName {
-			continue
-		}
+		familiesByName[family.GetName()] = family
+	}
+
+	for _, metricName := range metricNames {
+		family, ok := familiesByName[metricName]
+		require.Truef(t, ok, "metric family %s not found", metricName)
 		require.NotEmpty(t, family.GetMetric(), "metric %s had no series", metricName)
 		for _, metric := range family.GetMetric() {
-			assert.True(t, hasLabel(metric, "mdai_connection", connection), "metric %s missing mdai_connection=%q label: %+v", metricName, connection, metric.GetLabel())
+			assert.True(t, metricHasLabels(metric, labels), "metric %s missing labels %+v: %+v", metricName, labels, metric.GetLabel())
 		}
-		return
 	}
-
-	require.Failf(t, "metric family missing", "metric family %s not found", metricName)
 }
 
-func hasLabel(metric *dto.Metric, name, value string) bool {
-	for _, label := range metric.GetLabel() {
-		if label.GetName() == name && label.GetValue() == value {
-			return true
+func requireMetricsHaveConnectionLabel(t *testing.T, registry *prometheus.Registry, metricNames []string, connection string) {
+	t.Helper()
+
+	requireMetricsHaveLabels(t, registry, metricNames, map[string]string{"mdai_connection": connection})
+}
+
+func metricHasLabels(metric *dto.Metric, labels map[string]string) bool {
+	found := make(map[string]string, len(metric.GetLabel()))
+	for _, metricLabel := range metric.GetLabel() {
+		found[metricLabel.GetName()] = metricLabel.GetValue()
+	}
+	for name, value := range labels {
+		if found[name] != value {
+			return false
 		}
 	}
-	return false
+	return true
 }
 
 func counterValue(t *testing.T, metric prometheus.Metric) float64 {
@@ -130,6 +140,39 @@ func gaugeValue(t *testing.T, metric prometheus.Metric) float64 {
 	require.NoError(t, metric.Write(dtoMetric))
 
 	return dtoMetric.GetGauge().GetValue()
+}
+
+func captureWithBatch(
+	t *testing.T,
+	svc *Service,
+	source string,
+	signal Signal,
+	listener string,
+	requestPath string,
+	headers map[string]string,
+	batch []DecodedPayload,
+) ([]*observedPayload, []*ComparisonResult, bool) {
+	t.Helper()
+
+	svc.translators[defaultTranslatorID] = staticTranslator{
+		name:  defaultTranslatorID,
+		batch: batch,
+	}
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, requestPath, strings.NewReader("{}"))
+	for key, value := range headers {
+		req.Header.Set(key, value)
+	}
+	payloads, results, matched, err := svc.captureRequests(
+		defaultPairID,
+		defaultTranslatorID,
+		source,
+		signal,
+		listener,
+		requestPath,
+		req,
+	)
+	require.NoError(t, err)
+	return payloads, results, matched
 }
 
 func TestComparePairPassesWhenFieldsMatch(t *testing.T) {
@@ -203,6 +246,19 @@ func TestFlattenValueMap(t *testing.T) {
 	assert.Equal(t, "service.name", fields["resource.attributes[0].key"])
 	assert.Equal(t, "1", fields["value"])
 	assert.Equal(t, "true", fields["ok"])
+}
+
+func TestFlattenValueMapRootArray(t *testing.T) {
+	t.Parallel()
+
+	var payload any
+	require.NoError(t, json.Unmarshal([]byte(`[{"message":"a"},{"message":"b","nested":[true]}]`), &payload))
+
+	fields := flattenValueMap(payload)
+
+	assert.Equal(t, "a", fields["[0].message"])
+	assert.Equal(t, "b", fields["[1].message"])
+	assert.Equal(t, "true", fields["[1].nested[0]"])
 }
 
 func TestDecodeBodyJSONGzip(t *testing.T) {
@@ -330,16 +386,24 @@ func TestResolveCorrelationIDFromDecodedTracesPreferTraceID(t *testing.T) {
 func TestInferSignalFromDatadogPath(t *testing.T) {
 	t.Parallel()
 
-	cases := map[string]Signal{
-		"/v0.4/traces":                SignalTraces,
-		"/api/v1/series":              SignalMetrics,
-		"/api/v2/logs":                SignalLogs,
-		"/something/else":             SignalUnknown,
-		"/api/v1/distribution_points": SignalMetrics,
+	tests := []struct {
+		name        string
+		requestPath string
+		want        Signal
+	}{
+		{name: "traces", requestPath: "/v0.4/traces", want: SignalTraces},
+		{name: "series", requestPath: "/api/v1/series", want: SignalMetrics},
+		{name: "logs", requestPath: "/api/v2/logs", want: SignalLogs},
+		{name: "unknown", requestPath: "/something/else", want: SignalUnknown},
+		{name: "distribution points", requestPath: "/api/v1/distribution_points", want: SignalMetrics},
 	}
 
-	for requestPath, want := range cases {
-		assert.Equal(t, want, inferSignalFromDatadogPath(requestPath), "path=%s", requestPath)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			assert.Equal(t, tt.want, inferSignalFromDatadogPath(tt.requestPath))
+		})
 	}
 }
 
@@ -347,22 +411,27 @@ func TestParseExporterPath(t *testing.T) {
 	t.Parallel()
 
 	cases := []struct {
+		name           string
 		path           string
 		wantExporter   string
 		wantNormalized string
 	}{
-		{path: "/api/v2/logs", wantExporter: "", wantNormalized: "/api/v2/logs"},
-		{path: "/exporter/datadog/api/v2/logs", wantExporter: "datadog", wantNormalized: "/api/v2/logs"},
-		{path: "/exporter/datadog", wantExporter: "datadog", wantNormalized: "/"},
-		{path: "/observe/exporter/mdai/sample/gateway/datadog/api/v0.2/traces", wantExporter: "datadog", wantNormalized: "/api/v0.2/traces"},
-		{path: "/intake/exporter/mdai/sample/gateway/datadog/api/v0.2/traces", wantExporter: "intake", wantNormalized: "/exporter/mdai/sample/gateway/datadog/api/v0.2/traces"},
-		{path: "/splunk/services/collector/event", wantExporter: "splunk", wantNormalized: "/services/collector/event"},
+		{name: "datadog api path", path: "/api/v2/logs", wantExporter: "", wantNormalized: "/api/v2/logs"},
+		{name: "explicit exporter prefix", path: "/exporter/datadog/api/v2/logs", wantExporter: "datadog", wantNormalized: "/api/v2/logs"},
+		{name: "exporter root", path: "/exporter/datadog", wantExporter: "datadog", wantNormalized: "/"},
+		{name: "observe exporter path", path: "/observe/exporter/mdai/sample/gateway/datadog/api/v0.2/traces", wantExporter: "datadog", wantNormalized: "/api/v0.2/traces"},
+		{name: "intake path is not observe exporter path", path: "/intake/exporter/mdai/sample/gateway/datadog/api/v0.2/traces", wantExporter: "intake", wantNormalized: "/exporter/mdai/sample/gateway/datadog/api/v0.2/traces"},
+		{name: "non datadog exporter", path: "/splunk/services/collector/event", wantExporter: "splunk", wantNormalized: "/services/collector/event"},
 	}
 
 	for _, tc := range cases {
-		gotExporter, gotNormalized := parseExporterPath(tc.path)
-		assert.Equal(t, tc.wantExporter, gotExporter, "path=%s", tc.path)
-		assert.Equal(t, tc.wantNormalized, gotNormalized, "path=%s", tc.path)
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			gotExporter, gotNormalized := parseExporterPath(tc.path)
+			assert.Equal(t, tc.wantExporter, gotExporter)
+			assert.Equal(t, tc.wantNormalized, gotNormalized)
+		})
 	}
 }
 
@@ -370,22 +439,27 @@ func TestTrimSyntheticSourcePath(t *testing.T) {
 	t.Parallel()
 
 	cases := []struct {
+		name       string
 		path       string
 		source     string
 		wantSignal string
 		wantOK     bool
 	}{
-		{path: "/observe/exporter/traces", source: "exporter", wantSignal: "traces", wantOK: true},
-		{path: "/observe/receiver/logs", source: "receiver", wantSignal: "logs", wantOK: true},
-		{path: "/intake/exporter/metrics", source: "exporter", wantSignal: "", wantOK: false},
-		{path: "/intake/receiver/traces", source: "receiver", wantSignal: "", wantOK: false},
-		{path: "/api/v2/logs", source: "exporter", wantSignal: "", wantOK: false},
+		{name: "exporter observe path", path: "/observe/exporter/traces", source: "exporter", wantSignal: "traces", wantOK: true},
+		{name: "receiver observe path", path: "/observe/receiver/logs", source: "receiver", wantSignal: "logs", wantOK: true},
+		{name: "exporter intake path", path: "/intake/exporter/metrics", source: "exporter", wantSignal: "", wantOK: false},
+		{name: "receiver intake path", path: "/intake/receiver/traces", source: "receiver", wantSignal: "", wantOK: false},
+		{name: "datadog api path", path: "/api/v2/logs", source: "exporter", wantSignal: "", wantOK: false},
 	}
 
 	for _, tc := range cases {
-		gotSignal, gotOK := trimSyntheticSourcePath(tc.path, tc.source)
-		assert.Equal(t, tc.wantSignal, gotSignal, "path=%s", tc.path)
-		assert.Equal(t, tc.wantOK, gotOK, "path=%s", tc.path)
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			gotSignal, gotOK := trimSyntheticSourcePath(tc.path, tc.source)
+			assert.Equal(t, tc.wantSignal, gotSignal)
+			assert.Equal(t, tc.wantOK, gotOK)
+		})
 	}
 }
 
@@ -521,150 +595,127 @@ func TestIsSensitiveFieldName(t *testing.T) {
 	}
 }
 
-func TestSanitizedHeaders(t *testing.T) {
+func TestSanitizers(t *testing.T) {
 	t.Parallel()
 
-	tests := []struct {
-		name  string
-		input map[string]string
-		want  map[string]string
-	}{
-		{
-			name:  "nil map returned as-is",
-			input: nil,
-			want:  nil,
-		},
-		{
-			name:  "empty map returned as-is",
-			input: map[string]string{},
-			want:  map[string]string{},
-		},
-		{
-			name:  "non-sensitive headers pass through unchanged",
-			input: map[string]string{"Content-Type": "application/json", "X-Request-ID": "abc"},
-			want:  map[string]string{"Content-Type": "application/json", "X-Request-ID": "abc"},
-		},
-		{
-			name:  "sensitive header value masked, key preserved",
-			input: map[string]string{"DD-API-KEY": "secret", "Content-Type": "application/json"},
-			want:  map[string]string{"DD-API-KEY": "[REDACTED]", "Content-Type": "application/json"},
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			assert.Equal(t, tt.want, sanitizedHeaders(tt.input))
+	t.Run("headers", func(t *testing.T) {
+		t.Parallel()
+		testSanitizer(t, sanitizedHeaders, []sanitizerTestCase[map[string]string]{
+			{
+				name:  "nil map returned as-is",
+				input: nil,
+				want:  nil,
+			},
+			{
+				name:  "empty map returned as-is",
+				input: map[string]string{},
+				want:  map[string]string{},
+			},
+			{
+				name:  "non-sensitive headers pass through unchanged",
+				input: map[string]string{"Content-Type": "application/json", "X-Request-ID": "abc"},
+				want:  map[string]string{"Content-Type": "application/json", "X-Request-ID": "abc"},
+			},
+			{
+				name:  "sensitive header value masked, key preserved",
+				input: map[string]string{"DD-API-KEY": "secret", "Content-Type": "application/json"},
+				want:  map[string]string{"DD-API-KEY": "[REDACTED]", "Content-Type": "application/json"},
+			},
 		})
-	}
+	})
+
+	t.Run("attributes", func(t *testing.T) {
+		t.Parallel()
+		testSanitizer(t, sanitizedAttributes, []sanitizerTestCase[map[string]string]{
+			{
+				name:  "nil map returned as-is",
+				input: nil,
+				want:  nil,
+			},
+			{
+				name:  "empty map returned as-is",
+				input: map[string]string{},
+				want:  map[string]string{},
+			},
+			{
+				name:  "non-sensitive attributes pass through unchanged",
+				input: map[string]string{"message": "hello", "service.name": "svc"},
+				want:  map[string]string{"message": "hello", "service.name": "svc"},
+			},
+			{
+				name:  "sensitive attribute value masked, key preserved",
+				input: map[string]string{"attributes.DD_API_KEY": "secret", "message": "hello"},
+				want:  map[string]string{"attributes.DD_API_KEY": "[REDACTED]", "message": "hello"},
+			},
+		})
+	})
+
+	t.Run("attribute deltas", func(t *testing.T) {
+		t.Parallel()
+		testSanitizer(t, sanitizedAttributeDeltas, []sanitizerTestCase[[]AttributeDelta]{
+			{
+				name:  "nil slice returned as-is",
+				input: nil,
+				want:  nil,
+			},
+			{
+				name:  "empty slice returned as-is",
+				input: []AttributeDelta{},
+				want:  []AttributeDelta{},
+			},
+			{
+				name:  "non-sensitive delta passes through unchanged",
+				input: []AttributeDelta{{Attribute: "message", Receiver: "hello", Exporter: "world"}},
+				want:  []AttributeDelta{{Attribute: "message", Receiver: "hello", Exporter: "world"}},
+			},
+			{
+				name:  "sensitive delta values masked, attribute name preserved",
+				input: []AttributeDelta{{Attribute: "DD_API_KEY", Receiver: "r-secret", Exporter: "e-secret"}},
+				want:  []AttributeDelta{{Attribute: "DD_API_KEY", Receiver: "[REDACTED]", Exporter: "[REDACTED]"}},
+			},
+		})
+	})
+
+	t.Run("missing fields", func(t *testing.T) {
+		t.Parallel()
+		testSanitizer(t, sanitizedMissingFields, []sanitizerTestCase[[]MissingField]{
+			{
+				name:  "nil slice returned as-is",
+				input: nil,
+				want:  nil,
+			},
+			{
+				name:  "empty slice returned as-is",
+				input: []MissingField{},
+				want:  []MissingField{},
+			},
+			{
+				name:  "non-sensitive field passes through unchanged",
+				input: []MissingField{{Attribute: "message", Side: "exporter", Value: "hello"}},
+				want:  []MissingField{{Attribute: "message", Side: "exporter", Value: "hello"}},
+			},
+			{
+				name:  "sensitive field value masked, attribute and side preserved",
+				input: []MissingField{{Attribute: "DD_API_KEY", Side: "receiver", Value: "secret"}},
+				want:  []MissingField{{Attribute: "DD_API_KEY", Side: "receiver", Value: "[REDACTED]"}},
+			},
+		})
+	})
 }
 
-func TestSanitizedAttributes(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name  string
-		input map[string]string
-		want  map[string]string
-	}{
-		{
-			name:  "nil map returned as-is",
-			input: nil,
-			want:  nil,
-		},
-		{
-			name:  "empty map returned as-is",
-			input: map[string]string{},
-			want:  map[string]string{},
-		},
-		{
-			name:  "non-sensitive attributes pass through unchanged",
-			input: map[string]string{"message": "hello", "service.name": "svc"},
-			want:  map[string]string{"message": "hello", "service.name": "svc"},
-		},
-		{
-			name:  "sensitive attribute value masked, key preserved",
-			input: map[string]string{"attributes.DD_API_KEY": "secret", "message": "hello"},
-			want:  map[string]string{"attributes.DD_API_KEY": "[REDACTED]", "message": "hello"},
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			assert.Equal(t, tt.want, sanitizedAttributes(tt.input))
-		})
-	}
+type sanitizerTestCase[T any] struct {
+	name  string
+	input T
+	want  T
 }
 
-func TestSanitizedAttributeDeltas(t *testing.T) {
-	t.Parallel()
+func testSanitizer[T any](t *testing.T, sanitize func(T) T, tests []sanitizerTestCase[T]) {
+	t.Helper()
 
-	tests := []struct {
-		name  string
-		input []AttributeDelta
-		want  []AttributeDelta
-	}{
-		{
-			name:  "nil slice returned as-is",
-			input: nil,
-			want:  nil,
-		},
-		{
-			name:  "empty slice returned as-is",
-			input: []AttributeDelta{},
-			want:  []AttributeDelta{},
-		},
-		{
-			name:  "non-sensitive delta passes through unchanged",
-			input: []AttributeDelta{{Attribute: "message", Receiver: "hello", Exporter: "world"}},
-			want:  []AttributeDelta{{Attribute: "message", Receiver: "hello", Exporter: "world"}},
-		},
-		{
-			name:  "sensitive delta values masked, attribute name preserved",
-			input: []AttributeDelta{{Attribute: "DD_API_KEY", Receiver: "r-secret", Exporter: "e-secret"}},
-			want:  []AttributeDelta{{Attribute: "DD_API_KEY", Receiver: "[REDACTED]", Exporter: "[REDACTED]"}},
-		},
-	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			assert.Equal(t, tt.want, sanitizedAttributeDeltas(tt.input))
-		})
-	}
-}
-
-func TestSanitizedMissingFields(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name  string
-		input []MissingField
-		want  []MissingField
-	}{
-		{
-			name:  "nil slice returned as-is",
-			input: nil,
-			want:  nil,
-		},
-		{
-			name:  "empty slice returned as-is",
-			input: []MissingField{},
-			want:  []MissingField{},
-		},
-		{
-			name:  "non-sensitive field passes through unchanged",
-			input: []MissingField{{Attribute: "message", Side: "exporter", Value: "hello"}},
-			want:  []MissingField{{Attribute: "message", Side: "exporter", Value: "hello"}},
-		},
-		{
-			name:  "sensitive field value masked, attribute and side preserved",
-			input: []MissingField{{Attribute: "DD_API_KEY", Side: "receiver", Value: "secret"}},
-			want:  []MissingField{{Attribute: "DD_API_KEY", Side: "receiver", Value: "[REDACTED]"}},
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			assert.Equal(t, tt.want, sanitizedMissingFields(tt.input))
+			assert.Equal(t, tt.want, sanitize(tt.input))
 		})
 	}
 }
@@ -769,10 +820,12 @@ func TestRecordMetricsUsesConnectionLabel(t *testing.T) {
 	assert.InDelta(t, float64(1), counterValue(t, svc.requiredEval.WithLabelValues("shadow-a", "traces", "trace_id", "pass")), 0.000001)
 	assert.InDelta(t, float64(1), counterValue(t, svc.requiredEval.WithLabelValues("shadow-a", "traces", "service.name", "fail")), 0.000001)
 
-	requireMetricHasConnectionLabel(t, registry, "mdai_fidelity_attribute_checks_total", "shadow-a")
-	requireMetricHasConnectionLabel(t, registry, "mdai_fidelity_signal_checks_total", "shadow-a")
-	requireMetricHasConnectionLabel(t, registry, "mdai_fidelity_required_attribute_checks_total", "shadow-a")
-	requireMetricHasConnectionLabel(t, registry, "mdai_fidelity_required_signal_checks_total", "shadow-a")
+	requireMetricsHaveConnectionLabel(t, registry, []string{
+		"mdai_fidelity_attribute_checks_total",
+		"mdai_fidelity_signal_checks_total",
+		"mdai_fidelity_required_attribute_checks_total",
+		"mdai_fidelity_required_signal_checks_total",
+	}, "shadow-a")
 }
 
 func TestCaptureRequestUsesConnectionLabelForReceivedMetric(t *testing.T) {
@@ -811,7 +864,7 @@ func TestCaptureRequestUsesConnectionLabelForReceivedMetric(t *testing.T) {
 	assert.False(t, matched)
 	assert.InDelta(t, float64(1), counterValue(t, svc.receivedTotal.WithLabelValues("shadow-b", "receiver", "traces")), 0.000001)
 
-	requireMetricHasConnectionLabel(t, registry, "mdai_fidelity_payloads_received_total", "shadow-b")
+	requireMetricsHaveConnectionLabel(t, registry, []string{"mdai_fidelity_payloads_received_total"}, "shadow-b")
 }
 
 func TestAdjustPendingTotalUsesConnectionLabel(t *testing.T) {
@@ -824,7 +877,7 @@ func TestAdjustPendingTotalUsesConnectionLabel(t *testing.T) {
 
 	assert.InDelta(t, float64(2), gaugeValue(t, svc.pendingGauge.WithLabelValues("shadow-c")), 0.000001)
 
-	requireMetricHasConnectionLabel(t, registry, "mdai_fidelity_pending_payloads", "shadow-c")
+	requireMetricsHaveConnectionLabel(t, registry, []string{"mdai_fidelity_pending_payloads"}, "shadow-c")
 }
 
 func TestObserveDoesNotOverwriteNewerResult(t *testing.T) {
@@ -870,98 +923,186 @@ func TestObserveDoesNotOverwriteNewerResult(t *testing.T) {
 	assert.Equal(t, newer.ComparedAt, got.ComparedAt)
 }
 
-func TestExtractIndexedGroupsTraces(t *testing.T) {
+func TestExtractIndexedGroups(t *testing.T) {
 	t.Parallel()
 
-	flattened := map[string]string{
-		"traces[0][0].trace_id": "trace-aaa",
-		"traces[0][0].span_id":  "span-111",
-		"traces[0][1].trace_id": "trace-aaa",
-		"traces[0][1].span_id":  "span-222",
-		"traces[1][0].trace_id": "trace-bbb",
-		"traces[1][0].span_id":  "span-333",
+	tests := []struct {
+		name      string
+		groupName string
+		flattened map[string]string
+		want      []map[string]string
+	}{
+		{
+			name:      "traces",
+			groupName: "traces",
+			flattened: map[string]string{
+				"traces[0][0].trace_id": "trace-aaa",
+				"traces[0][0].span_id":  "span-111",
+				"traces[0][1].trace_id": "trace-aaa",
+				"traces[0][1].span_id":  "span-222",
+				"traces[1][0].trace_id": "trace-bbb",
+				"traces[1][0].span_id":  "span-333",
+			},
+			want: []map[string]string{
+				{
+					"[0].trace_id": "trace-aaa",
+					"[0].span_id":  "span-111",
+					"[1].trace_id": "trace-aaa",
+					"[1].span_id":  "span-222",
+				},
+				{
+					"[0].trace_id": "trace-bbb",
+					"[0].span_id":  "span-333",
+				},
+			},
+		},
+		{
+			name:      "metrics",
+			groupName: "series",
+			flattened: map[string]string{
+				"series[0].metric":    "cpu.usage",
+				"series[0].points[0]": "42",
+				"series[1].metric":    "mem.usage",
+				"series[1].points[0]": "1024",
+			},
+			want: []map[string]string{
+				{
+					"metric":    "cpu.usage",
+					"points[0]": "42",
+				},
+				{
+					"metric":    "mem.usage",
+					"points[0]": "1024",
+				},
+			},
+		},
+		{
+			name:      "logs root array",
+			groupName: "",
+			flattened: map[string]string{
+				"[0].message":   "log entry A",
+				"[0].timestamp": "2025-01-01T00:00:00Z",
+				"[0].hostname":  "host-1",
+				"[1].message":   "log entry B",
+				"[1].timestamp": "2025-01-01T00:00:01Z",
+				"[1].hostname":  "host-2",
+			},
+			want: []map[string]string{
+				{
+					"message":   "log entry A",
+					"timestamp": "2025-01-01T00:00:00Z",
+					"hostname":  "host-1",
+				},
+				{
+					"message":   "log entry B",
+					"timestamp": "2025-01-01T00:00:01Z",
+					"hostname":  "host-2",
+				},
+			},
+		},
+		{
+			name:      "no matching prefix returns original",
+			groupName: "traces",
+			flattened: map[string]string{
+				"trace_id": "abc",
+				"span_id":  "def",
+			},
+			want: []map[string]string{
+				{
+					"trace_id": "abc",
+					"span_id":  "def",
+				},
+			},
+		},
 	}
 
-	groups := extractIndexedGroups(flattened, "traces")
-	require.Len(t, groups, 2)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 
-	assert.Equal(t, "trace-aaa", groups[0]["[0].trace_id"])
-	assert.Equal(t, "span-111", groups[0]["[0].span_id"])
-	assert.Equal(t, "trace-aaa", groups[0]["[1].trace_id"])
-	assert.Equal(t, "span-222", groups[0]["[1].span_id"])
-
-	assert.Equal(t, "trace-bbb", groups[1]["[0].trace_id"])
-	assert.Equal(t, "span-333", groups[1]["[0].span_id"])
+			assert.Equal(t, tt.want, extractIndexedGroups(tt.flattened, tt.groupName))
+		})
+	}
 }
 
-func TestExtractIndexedGroupsMetrics(t *testing.T) {
+func TestDecodeAllTraces(t *testing.T) {
 	t.Parallel()
 
-	flattened := map[string]string{
-		"series[0].metric":    "cpu.usage",
-		"series[0].points[0]": "42",
-		"series[1].metric":    "mem.usage",
-		"series[1].points[0]": "1024",
+	tests := []struct {
+		name       string
+		rawFlat    map[string]string
+		prefix     string
+		wantGroups int
+		wantSpans  [][]map[string]string
+	}{
+		{
+			name:   "unwrapped format",
+			prefix: "",
+			rawFlat: map[string]string{
+				"[0][0].trace_id": "trace-aaa",
+				"[0][0].span_id":  "span-111",
+				"[0][0].name":     "web.request",
+				"[0][1].trace_id": "trace-aaa",
+				"[0][1].span_id":  "span-222",
+				"[0][1].name":     "db.query",
+				"[1][0].trace_id": "trace-bbb",
+				"[1][0].span_id":  "span-333",
+				"[1][0].name":     "background.job",
+			},
+			wantGroups: 2,
+			wantSpans: [][]map[string]string{
+				{
+					{"trace_id": "trace-aaa", "span_id": "span-111", "name": "web.request"},
+					{"trace_id": "trace-aaa", "span_id": "span-222", "name": "db.query"},
+				},
+				{
+					{"trace_id": "trace-bbb", "span_id": "span-333", "name": "background.job"},
+				},
+			},
+		},
+		{
+			name:   "wrapped format",
+			prefix: "traces",
+			rawFlat: map[string]string{
+				"traces[0][0].trace_id": "trace-aaa",
+				"traces[0][0].span_id":  "span-111",
+				"traces[0][0].name":     "web.request",
+				"traces[0][1].trace_id": "trace-aaa",
+				"traces[0][1].span_id":  "span-222",
+				"traces[0][1].name":     "db.query",
+				"traces[1][0].trace_id": "trace-bbb",
+				"traces[1][0].span_id":  "span-333",
+				"traces[1][0].name":     "background.job",
+			},
+			wantGroups: 2,
+			wantSpans: [][]map[string]string{
+				{
+					{"trace_id": "trace-aaa", "span_id": "span-111", "name": "web.request"},
+					{"trace_id": "trace-aaa", "span_id": "span-222", "name": "db.query"},
+				},
+				{
+					{"trace_id": "trace-bbb", "span_id": "span-333", "name": "background.job"},
+				},
+			},
+		},
 	}
 
-	groups := extractIndexedGroups(flattened, "series")
-	require.Len(t, groups, 2)
-	assert.Equal(t, "cpu.usage", groups[0]["metric"])
-	assert.Equal(t, "mem.usage", groups[1]["metric"])
-}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 
-func TestExtractIndexedGroupsNoMatchReturnsOriginal(t *testing.T) {
-	t.Parallel()
+			groups := extractIndexedGroups(tt.rawFlat, tt.prefix)
+			require.Len(t, groups, tt.wantGroups)
 
-	flattened := map[string]string{
-		"trace_id": "abc",
-		"span_id":  "def",
+			for i, wantSpans := range tt.wantSpans {
+				spans := newTraceGroup(groups[i]).spans
+				require.Len(t, spans, len(wantSpans))
+				for j, want := range wantSpans {
+					assert.Equal(t, want, spans[j])
+				}
+			}
+		})
 	}
-
-	groups := extractIndexedGroups(flattened, "traces")
-	require.Len(t, groups, 1)
-	assert.Equal(t, flattened, groups[0])
-}
-
-// TestDecodeAllTracesUnwrappedFormat verifies that /v0.4/traces payloads (root-level [[span,...]]
-// with no "traces" wrapper) are correctly split into per-trace groups and that individual span
-// maps have bare field names (e.g. "span_id", "name") suitable for span matching.
-func TestDecodeAllTracesUnwrappedFormat(t *testing.T) {
-	t.Parallel()
-
-	// Two trace groups: trace-aaa has 2 spans, trace-bbb has 1 span.
-	// Flat keys follow the unwrapped [[span,...]] structure.
-	rawFlat := map[string]string{
-		"[0][0].trace_id": "trace-aaa",
-		"[0][0].span_id":  "span-111",
-		"[0][0].name":     "web.request",
-		"[0][1].trace_id": "trace-aaa",
-		"[0][1].span_id":  "span-222",
-		"[0][1].name":     "db.query",
-		"[1][0].trace_id": "trace-bbb",
-		"[1][0].span_id":  "span-333",
-		"[1][0].name":     "background.job",
-	}
-
-	// hasKeyPrefix should detect no "traces[" key and choose root-level grouping.
-	assert.False(t, hasKeyPrefix(rawFlat, "traces["))
-
-	groups := extractIndexedGroups(rawFlat, "")
-	require.Len(t, groups, 2)
-
-	// Each group should contain [j].field keys for its spans.
-	assert.Equal(t, "trace-aaa", groups[0]["[0].trace_id"])
-	assert.Equal(t, "span-111", groups[0]["[0].span_id"])
-	assert.Equal(t, "trace-aaa", groups[0]["[1].trace_id"])
-	assert.Equal(t, "span-222", groups[0]["[1].span_id"])
-
-	// newTraceGroup should then yield bare field names per span.
-	spans := newTraceGroup(groups[0]).spans
-	require.Len(t, spans, 2)
-	assert.Equal(t, "span-111", spans[0]["span_id"])
-	assert.Equal(t, "web.request", spans[0]["name"])
-	assert.Equal(t, "span-222", spans[1]["span_id"])
-	assert.Equal(t, "db.query", spans[1]["name"])
 }
 
 func TestCaptureRequestsBatchSplitMatchesIndependently(t *testing.T) {
@@ -972,71 +1113,55 @@ func TestCaptureRequestsBatchSplitMatchesIndependently(t *testing.T) {
 	svc, _ := newMetricsTestService("batch-split")
 	svc.retention = time.Minute
 
-	// Receiver: one HTTP request carrying two trace groups (canonical attributes, already field-mapped).
-	svc.translators[defaultTranslatorID] = staticTranslator{
-		name: defaultTranslatorID,
-		batch: []DecodedPayload{
+	payloads, results, anyMatched := captureWithBatch(
+		t,
+		svc,
+		"receiver",
+		SignalTraces,
+		":8126",
+		"/v0.4/traces",
+		nil,
+		[]DecodedPayload{
 			{Signal: SignalTraces, Attributes: map[string]string{"trace_id": "trace-aaa", "span_id": "span-111"}, Format: "json"},
 			{Signal: SignalTraces, Attributes: map[string]string{"trace_id": "trace-bbb", "span_id": "span-333"}, Format: "json"},
 		},
-	}
-
-	recvReq := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/v0.4/traces", strings.NewReader("{}"))
-	payloads, results, anyMatched, err := svc.captureRequests(defaultPairID, defaultTranslatorID, "receiver", SignalTraces, ":8126", "/v0.4/traces", recvReq)
-	require.NoError(t, err)
+	)
 	require.Len(t, payloads, 2)
 	assert.False(t, anyMatched)
 	assert.Nil(t, results[0])
 	assert.Nil(t, results[1])
 
-	// Exporter sends trace-aaa alone (batch split: this is the first of two exporter requests).
-	svc.translators[defaultTranslatorID] = staticTranslator{
-		name: defaultTranslatorID,
-		batch: []DecodedPayload{
+	pA, rA, matchedA := captureWithBatch(
+		t,
+		svc,
+		"exporter",
+		SignalTraces,
+		":18081",
+		"/v0.4/traces",
+		nil,
+		[]DecodedPayload{
 			{Signal: SignalTraces, Attributes: map[string]string{"trace_id": "trace-aaa", "span_id": "span-111"}, Format: "json"},
 		},
-	}
-	expReqA := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/v0.4/traces", strings.NewReader("{}"))
-	pA, rA, matchedA, err := svc.captureRequests(defaultPairID, defaultTranslatorID, "exporter", SignalTraces, ":18081", "/v0.4/traces", expReqA)
-	require.NoError(t, err)
+	)
 	require.Len(t, pA, 1)
 	assert.True(t, matchedA, "trace-aaa should match receiver group 0")
 	require.NotNil(t, rA[0])
 
-	// Exporter sends trace-bbb alone (second exporter request from same original batch).
-	svc.translators[defaultTranslatorID] = staticTranslator{
-		name: defaultTranslatorID,
-		batch: []DecodedPayload{
+	pB, rB, matchedB := captureWithBatch(
+		t,
+		svc,
+		"exporter",
+		SignalTraces,
+		":18081",
+		"/v0.4/traces",
+		nil,
+		[]DecodedPayload{
 			{Signal: SignalTraces, Attributes: map[string]string{"trace_id": "trace-bbb", "span_id": "span-333"}, Format: "json"},
 		},
-	}
-	expReqB := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/v0.4/traces", strings.NewReader("{}"))
-	pB, rB, matchedB, err := svc.captureRequests(defaultPairID, defaultTranslatorID, "exporter", SignalTraces, ":18081", "/v0.4/traces", expReqB)
-	require.NoError(t, err)
+	)
 	require.Len(t, pB, 1)
 	assert.True(t, matchedB, "trace-bbb should match receiver group 1")
 	require.NotNil(t, rB[0])
-}
-
-func TestExtractIndexedGroupsLogsRootArray(t *testing.T) {
-	t.Parallel()
-
-	// Datadog log payloads are root-level JSON arrays; flat keys are [i].field.
-	flattened := map[string]string{
-		"[0].message":   "log entry A",
-		"[0].timestamp": "2025-01-01T00:00:00Z",
-		"[0].hostname":  "host-1",
-		"[1].message":   "log entry B",
-		"[1].timestamp": "2025-01-01T00:00:01Z",
-		"[1].hostname":  "host-2",
-	}
-
-	groups := extractIndexedGroups(flattened, "")
-	require.Len(t, groups, 2)
-	assert.Equal(t, "log entry A", groups[0]["message"])
-	assert.Equal(t, "host-1", groups[0]["hostname"])
-	assert.Equal(t, "log entry B", groups[1]["message"])
-	assert.Equal(t, "host-2", groups[1]["hostname"])
 }
 
 func TestCaptureRequestsLogBatchMergeMatchesPerCorrelationGroup(t *testing.T) {
@@ -1049,48 +1174,53 @@ func TestCaptureRequestsLogBatchMergeMatchesPerCorrelationGroup(t *testing.T) {
 	svc, _ := newMetricsTestService("log-merge")
 	svc.retention = time.Minute
 
-	// Receiver batch 1: one payload (no per-entry correlation_id → kept as one batch).
-	svc.translators[defaultTranslatorID] = staticTranslator{
-		name: defaultTranslatorID,
-		batch: []DecodedPayload{
+	p1, _, matched1 := captureWithBatch(
+		t,
+		svc,
+		"receiver",
+		SignalLogs,
+		":8126",
+		"/api/v2/logs",
+		map[string]string{"X-Correlation-ID": "uuid-1"},
+		[]DecodedPayload{
 			{Signal: SignalLogs, Attributes: map[string]string{"message": "msg-A", "hostname": "h1"}, Format: "json"},
 		},
-	}
-	recv1Req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/api/v2/logs", strings.NewReader("{}"))
-	recv1Req.Header.Set("X-Correlation-ID", "uuid-1")
-	p1, _, matched1, err := svc.captureRequests(defaultPairID, defaultTranslatorID, "receiver", SignalLogs, ":8126", "/api/v2/logs", recv1Req)
-	require.NoError(t, err)
+	)
 	require.Len(t, p1, 1)
 	assert.Equal(t, "logs:uuid-1", p1[0].correlation)
 	assert.False(t, matched1)
 
-	// Receiver batch 2: one payload.
-	svc.translators[defaultTranslatorID] = staticTranslator{
-		name: defaultTranslatorID,
-		batch: []DecodedPayload{
+	p2, _, matched2 := captureWithBatch(
+		t,
+		svc,
+		"receiver",
+		SignalLogs,
+		":8126",
+		"/api/v2/logs",
+		map[string]string{"X-Correlation-ID": "uuid-2"},
+		[]DecodedPayload{
 			{Signal: SignalLogs, Attributes: map[string]string{"message": "msg-B", "hostname": "h2"}, Format: "json"},
 		},
-	}
-	recv2Req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/api/v2/logs", strings.NewReader("{}"))
-	recv2Req.Header.Set("X-Correlation-ID", "uuid-2")
-	p2, _, matched2, err := svc.captureRequests(defaultPairID, defaultTranslatorID, "receiver", SignalLogs, ":8126", "/api/v2/logs", recv2Req)
-	require.NoError(t, err)
+	)
 	require.Len(t, p2, 1)
 	assert.Equal(t, "logs:uuid-2", p2[0].correlation)
 	assert.False(t, matched2)
 
 	// Exporter sends merged batch: each entry carries its original correlation_id so the
 	// translator strategy produces the right per-group correlation.
-	svc.translators[defaultTranslatorID] = staticTranslator{
-		name: defaultTranslatorID,
-		batch: []DecodedPayload{
+	expPayloads, expResults, anyMatched := captureWithBatch(
+		t,
+		svc,
+		"exporter",
+		SignalLogs,
+		":18081",
+		"/api/v2/logs",
+		nil,
+		[]DecodedPayload{
 			{Signal: SignalLogs, CorrelationID: "uuid-1", Attributes: map[string]string{"message": "msg-A", "correlation_id": "uuid-1", "hostname": "h1"}, Format: "json"},
 			{Signal: SignalLogs, CorrelationID: "uuid-2", Attributes: map[string]string{"message": "msg-B", "correlation_id": "uuid-2", "hostname": "h2"}, Format: "json"},
 		},
-	}
-	expReq := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/api/v2/logs", strings.NewReader("{}"))
-	expPayloads, expResults, anyMatched, err := svc.captureRequests(defaultPairID, defaultTranslatorID, "exporter", SignalLogs, ":18081", "/api/v2/logs", expReq)
-	require.NoError(t, err)
+	)
 	require.Len(t, expPayloads, 2)
 	assert.True(t, anyMatched, "both exporter groups should match their receiver batches")
 	require.NotNil(t, expResults[0])
@@ -1201,7 +1331,8 @@ func TestDeriveCorrelationFromMetricTagsBeforeMetricName(t *testing.T) {
 		"series[0].tags[1]": "correlation_id:corr-123",
 	}
 
-	got := deriveCorrelationFromFields("metrics", fields)
+	got, _, _, ok := deriveCorrelationFromFieldsDetailed("metrics", fields)
+	require.True(t, ok)
 	assert.Equal(t, "metrics:corr-123", got)
 }
 
@@ -1218,7 +1349,8 @@ func TestDeriveCorrelationFromBatchExplodedMetricTags(t *testing.T) {
 		"type":    "gauge",
 	}
 
-	got := deriveCorrelationFromFields("metrics", fields)
+	got, _, _, ok := deriveCorrelationFromFieldsDetailed("metrics", fields)
+	require.True(t, ok)
 	assert.Equal(t, "metrics:corr-456", got)
 }
 
@@ -1229,7 +1361,8 @@ func TestDeriveCorrelationFromLogDDTags(t *testing.T) {
 		"[0].ddtags": "env:dev,correlation_id:corr-log-1",
 	}
 
-	got := deriveCorrelationFromFields("logs", fields)
+	got, _, _, ok := deriveCorrelationFromFieldsDetailed("logs", fields)
+	require.True(t, ok)
 	assert.Equal(t, "logs:corr-log-1", got)
 }
 
@@ -1312,78 +1445,6 @@ func TestComparePairStripsCorrelationFromLogMessageJSON(t *testing.T) {
 
 	result := comparePair(receiver, exporter, Policy{})
 	assert.True(t, result.FullPayloadPassed, "expected full payload pass, got %#v", result)
-}
-
-func TestSortSpansByID(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name     string
-		rawGroup map[string]string
-		want     map[string]string
-	}{
-		{
-			name: "sorts numeric span IDs ascending",
-			rawGroup: map[string]string{
-				"[0].span_id": "300",
-				"[0].name":    "third",
-				"[1].span_id": "100",
-				"[1].name":    "first",
-				"[2].span_id": "200",
-				"[2].name":    "second",
-			},
-			want: map[string]string{
-				"[0].span_id": "100",
-				"[0].name":    "first",
-				"[1].span_id": "200",
-				"[1].name":    "second",
-				"[2].span_id": "300",
-				"[2].name":    "third",
-			},
-		},
-		{
-			name: "preserves non-indexed keys",
-			rawGroup: map[string]string{
-				"[0].span_id":     "200",
-				"[1].span_id":     "100",
-				"top-level-value": "kept",
-			},
-			want: map[string]string{
-				"[0].span_id":     "100",
-				"[1].span_id":     "200",
-				"top-level-value": "kept",
-			},
-		},
-		{
-			name: "sorts numeric IDs before non-numeric IDs",
-			rawGroup: map[string]string{
-				"[0].span_id": "10abc",
-				"[0].name":    "non-numeric",
-				"[1].span_id": "9",
-				"[1].name":    "numeric-nine",
-				"[2].span_id": "10",
-				"[2].name":    "numeric-ten",
-			},
-			want: map[string]string{
-				"[0].span_id": "9",
-				"[0].name":    "numeric-nine",
-				"[1].span_id": "10",
-				"[1].name":    "numeric-ten",
-				"[2].span_id": "10abc",
-				"[2].name":    "non-numeric",
-			},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-
-			got := sortSpansByID(tt.rawGroup)
-
-			assert.Equal(t, tt.want, got)
-		})
-	}
 }
 
 func TestComparePairReorderedSpansNoTopLevelMismatch(t *testing.T) {
@@ -1531,47 +1592,58 @@ func TestComparePairIgnoresCorrelationIDField(t *testing.T) {
 func TestResolvePairForRequest(t *testing.T) {
 	t.Parallel()
 
-	svc := &Service{
-		logger:      zap.NewNop(),
-		defaultPair: defaultPairID,
-		pairs: map[string]configuredPair{
-			defaultPairID: {
-				PairConfig: PairConfig{
-					ID:                 defaultPairID,
-					ReceiverTranslator: defaultTranslatorID,
-					ExporterTranslator: defaultTranslatorID,
+	newTestService := func() *Service {
+		return &Service{
+			logger:      zap.NewNop(),
+			defaultPair: defaultPairID,
+			pairs: map[string]configuredPair{
+				defaultPairID: {
+					PairConfig: PairConfig{
+						ID:                 defaultPairID,
+						ReceiverTranslator: defaultTranslatorID,
+						ExporterTranslator: defaultTranslatorID,
+					},
+				},
+				"shadow-a": {
+					PairConfig: PairConfig{
+						ID:                 "shadow-a",
+						ReceiverTranslator: defaultTranslatorID,
+						ExporterTranslator: defaultTranslatorID,
+						ReceiverPorts:      []string{"18126"},
+					},
 				},
 			},
-			"shadow-a": {
-				PairConfig: PairConfig{
-					ID:                 "shadow-a",
-					ReceiverTranslator: defaultTranslatorID,
-					ExporterTranslator: defaultTranslatorID,
-					ReceiverPorts:      []string{"18126"},
-				},
-			},
-		},
-		receiverPairByPort: map[string]string{"18126": "shadow-a"},
-		exporterPairByPort: map[string]string{},
+			receiverPairByPort: map[string]string{"18126": "shadow-a"},
+			exporterPairByPort: map[string]string{},
+		}
 	}
 
-	req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/v0.4/traces", http.NoBody)
-	gotDefault := svc.resolvePairForRequest(req, "receiver", ":8126")
-	assert.Equal(t, defaultPairID, gotDefault.ID)
+	tests := []struct {
+		name    string
+		headers map[string]string
+		wantID  string
+	}{
+		{name: "default pair", wantID: defaultPairID},
+		{name: "port mapped pair", headers: map[string]string{"X-Forwarded-Port": "18126"}, wantID: "shadow-a"},
+		{name: "named pair header", headers: map[string]string{pairHeaderKey: "shadow-a"}, wantID: "shadow-a"},
+	}
 
-	req.Header.Set("X-Forwarded-Port", "18126")
-	gotPortMapped := svc.resolvePairForRequest(req, "receiver", ":8126")
-	assert.Equal(t, "shadow-a", gotPortMapped.ID)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 
-	req.Header.Set(pairHeaderKey, "shadow-a")
-	gotNamed := svc.resolvePairForRequest(req, "receiver", ":8126")
-	assert.Equal(t, "shadow-a", gotNamed.ID)
+			req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/v0.4/traces", http.NoBody)
+			for key, value := range tt.headers {
+				req.Header.Set(key, value)
+			}
+			got := newTestService().resolvePairForRequest(req, "receiver", ":8126")
+			assert.Equal(t, tt.wantID, got.ID)
+		})
+	}
 }
 
-func TestHandleAdminPairs(t *testing.T) {
-	t.Parallel()
-
-	svc := &Service{
+func newAdminPairsTestService() *Service {
+	return &Service{
 		logger:      zap.NewNop(),
 		defaultPair: defaultPairID,
 		translators: map[string]PayloadTranslator{
@@ -1587,32 +1659,37 @@ func TestHandleAdminPairs(t *testing.T) {
 			},
 		},
 	}
+}
 
-	body := `{"id":"shadow-b","receiver_translator":"datadog_raw","exporter_translator":"datadog_raw","default":true}`
+func postAdminPair(t *testing.T, svc *Service, body string) *httptest.ResponseRecorder {
+	t.Helper()
+
 	req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/admin/pairs", strings.NewReader(body))
 	rec := httptest.NewRecorder()
-
 	svc.handleAdminPairs(rec, req)
 	require.Equal(t, http.StatusAccepted, rec.Code, "body=%s", rec.Body.String())
+	return rec
+}
 
+func TestHandleAdminPairs(t *testing.T) {
+	t.Parallel()
+
+	svc := newAdminPairsTestService()
+
+	body := `{"id":"shadow-b","receiver_translator":"datadog_raw","exporter_translator":"datadog_raw","default":true}`
+	postAdminPair(t, svc, body)
 	_, ok := svc.pairs["shadow-b"]
 	require.True(t, ok, "expected pair shadow-b to be saved")
 	assert.Equal(t, "shadow-b", svc.defaultPair)
 
 	body = `{"id":"shadow-c","receiver_translator":"datadog_raw","exporter_translator":"datadog_raw","receiver_ports":["18126"],"exporter_ports":["18081"]}`
-	req = httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/admin/pairs", strings.NewReader(body))
-	rec = httptest.NewRecorder()
-	svc.handleAdminPairs(rec, req)
-	require.Equal(t, http.StatusAccepted, rec.Code, "body=%s", rec.Body.String())
+	postAdminPair(t, svc, body)
 	assert.Equal(t, "shadow-c", svc.receiverPairByPort["18126"])
 	assert.Equal(t, "shadow-c", svc.exporterPairByPort["18081"])
 
 	body = `{"id":"shadow-d","receiver_translator":"datadog_raw","exporter_translator":"datadog_raw","exporter_ignore_paths":["/api/beta/sketches","api/v2/sketches"]}`
-	req = httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/admin/pairs", strings.NewReader(body))
-	rec = httptest.NewRecorder()
-	svc.handleAdminPairs(rec, req)
-	require.Equal(t, http.StatusAccepted, rec.Code, "body=%s", rec.Body.String())
-	assert.True(t, reflect.DeepEqual(svc.pairs["shadow-d"].ExporterIgnorePaths, []string{"/api/beta/sketches", "/api/v2/sketches"}), "unexpected exporter ignore paths: %#v", svc.pairs["shadow-d"].ExporterIgnorePaths)
+	postAdminPair(t, svc, body)
+	assert.Equal(t, []string{"/api/beta/sketches", "/api/v2/sketches"}, svc.pairs["shadow-d"].ExporterIgnorePaths)
 }
 
 func TestNormalizePathPatternList(t *testing.T) {
@@ -1621,7 +1698,61 @@ func TestNormalizePathPatternList(t *testing.T) {
 	got, err := normalizePathPatternList([]string{" api/beta/sketches ", "/api/beta/*", "/api/beta/sketches"})
 	require.NoError(t, err)
 	want := []string{"/api/beta/*", "/api/beta/sketches"}
-	assert.True(t, reflect.DeepEqual(got, want), "normalizePathPatternList() = %#v want %#v", got, want)
+	assert.Equal(t, want, got)
+}
+
+func TestCanonicalPort(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		raw  string
+		want string
+		ok   bool
+	}{
+		{name: "plain port", raw: "8126", want: "8126", ok: true},
+		{name: "colon prefixed port", raw: ":8126", want: "8126", ok: true},
+		{name: "host port", raw: "127.0.0.1:8126", want: "8126", ok: true},
+		{name: "ipv6 host port", raw: "[::1]:8126", want: "8126", ok: true},
+		{name: "first forwarded value", raw: "8126, 18126", want: "8126", ok: true},
+		{name: "empty", raw: " ", ok: false},
+		{name: "non numeric", raw: "localhost", ok: false},
+		{name: "host non numeric port", raw: "localhost:http", ok: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			got, ok := canonicalPort(tt.raw)
+			assert.Equal(t, tt.ok, ok)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func TestLooksLikeJSON(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		body []byte
+		want bool
+	}{
+		{name: "object", body: []byte(`{"ok":true}`), want: true},
+		{name: "array with whitespace", body: []byte("\n\t [1]"), want: true},
+		{name: "empty", body: nil, want: false},
+		{name: "whitespace only", body: []byte(" \r\n\t"), want: false},
+		{name: "not json", body: []byte("text"), want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			assert.Equal(t, tt.want, looksLikeJSON(tt.body))
+		})
+	}
 }
 
 func TestConfiguredPairShouldIgnorePath(t *testing.T) {

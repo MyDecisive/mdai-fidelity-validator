@@ -117,6 +117,28 @@ func TestExtractMappedValuePrefersShallowSuffixMatch(t *testing.T) {
 	assert.Equal(t, "218523465776977553", value)
 }
 
+func TestFieldCandidateDepth(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		value string
+		want  int
+	}{
+		{value: "service.name", want: 1},
+		{value: "traces[0][0].meta.otel.trace_id", want: 5},
+		{value: "message", want: 0},
+		{value: "", want: 0},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.value, func(t *testing.T) {
+			t.Parallel()
+
+			assert.Equal(t, tt.want, fieldCandidateDepth(tt.value))
+		})
+	}
+}
+
 func TestFieldMappingMapForPathPrefersExporterSpecificRules(t *testing.T) {
 	t.Parallel()
 

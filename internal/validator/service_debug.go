@@ -59,16 +59,15 @@ func sanitizedDebugPayloadFromObserved(payload *observedPayload) DebugPayload {
 	debug.Request.Headers = sanitizedHeaders(debug.Request.Headers)
 	debug.Attributes = sanitizedAttributes(debug.Attributes)
 	if shouldIncludeRawPayload(payload) {
-		debug.RawBody = sanitizedRawPayload(rawBodyFromPayload(payload))
+		var rawBody string
+		if utf8.Valid(payload.body) {
+			rawBody = string(payload.body)
+		} else {
+			rawBody = base64.StdEncoding.EncodeToString(payload.body)
+		}
+		debug.RawBody = sanitizedRawPayload(rawBody)
 	}
 	return debug
-}
-
-func rawBodyFromPayload(payload *observedPayload) string {
-	if !utf8.Valid(payload.body) {
-		return base64.StdEncoding.EncodeToString(payload.body)
-	}
-	return string(payload.body)
 }
 
 func sanitizedComparisonResult(result ComparisonResult) ComparisonResult {
