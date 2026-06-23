@@ -415,8 +415,3 @@ func TestDiffSpanPair(t *testing.T) {
 		})
 	}
 }
-
-/*
-  - isDecimalPort — no test; TestCanonicalPort covers canonicalPort which calls it, but not directly
-  - readRequestPath — no test
-*/
