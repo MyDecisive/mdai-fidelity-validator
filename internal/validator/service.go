@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -567,4 +568,9 @@ func resolveConnectionName() string {
 		return defaultConnection
 	}
 	return connectionName
+}
+
+func isDecimalPort(value string) bool {
+	port, err := strconv.Atoi(value)
+	return err == nil && port >= 0 && port <= 65535 && strconv.Itoa(port) == value
 }

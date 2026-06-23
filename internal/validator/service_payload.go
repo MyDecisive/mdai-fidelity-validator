@@ -396,18 +396,6 @@ func canonicalPort(raw string) (string, bool) {
 	return "", false
 }
 
-func isDecimalPort(value string) bool {
-	if value == "" {
-		return false
-	}
-	for i := range len(value) {
-		if value[i] < '0' || value[i] > '9' {
-			return false
-		}
-	}
-	return true
-}
-
 func (s *Service) captureDatadogAPIRequest(listener string, r *http.Request) {
 	body := mustReadBodyBytes(s, r)
 	requestPath := readRequestPath(r)
