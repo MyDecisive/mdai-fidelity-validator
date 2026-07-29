@@ -1,0 +1,23 @@
+sequenceDiagram
+    participant R as Receiver side
+    participant V as Validator
+    participant E as Exporter side
+    participant P as Prometheus
+
+    R->>V: POST :8126/path (correlation C)
+    V->>V: Decode, split, map
+    V->>V: payloads_received_total(receiver)++
+    V->>V: pending[C] = receiver item
+    V->>V: pending_payloads = size(pending)
+    V-->>R: Datadog-compatible ACK
+
+    E->>V: POST :18081/exporter/name/path (correlation C)
+    V->>V: Decode, split, map
+    V->>V: payloads_received_total(exporter)++
+    V->>V: remove pending[C]
+    V->>V: full diff + policy evaluation
+    V->>V: signal/attribute counters++
+    V-->>E: Datadog-compatible ACK
+
+    P->>V: GET :8888/metrics
+    V-->>P: cumulative counters + pending gauge

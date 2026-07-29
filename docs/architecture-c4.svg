@@ -1,0 +1,81 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="620" viewBox="0 0 1200 620" role="img" aria-labelledby="title desc">
+  <title id="title">MDAI Fidelity Validator — C4 System Context</title>
+  <desc id="desc">The telemetry pipeline sends receiver-side and exporter-side observations to the MDAI Fidelity Validator. A telemetry operator inspects comparisons through the validator. Prometheus scrapes fidelity metrics from the validator.</desc>
+
+  <defs>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="9" refY="5" orient="auto" markerUnits="strokeWidth">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#374151"/>
+    </marker>
+    <style>
+      .title { font: 700 25px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #111827; }
+      .name { font: 700 18px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #ffffff; text-anchor: middle; }
+      .type { font: 400 13px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #e5effa; text-anchor: middle; }
+      .description { font: 400 14px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #ffffff; text-anchor: middle; }
+      .relationship { font: 600 13px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #1f2937; text-anchor: middle; }
+      .protocol { font: 400 12px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #4b5563; text-anchor: middle; }
+      .line { fill: none; stroke: #374151; stroke-width: 2; marker-end: url(#arrow); }
+      .label-bg { fill: #ffffff; }
+    </style>
+  </defs>
+
+  <rect width="1200" height="620" fill="#ffffff"/>
+  <text x="600" y="42" class="title" text-anchor="middle">MDAI Fidelity Validator — System Context</text>
+
+  <!-- External person -->
+  <rect x="40" y="75" width="260" height="135" rx="5" fill="#08427b"/>
+  <circle cx="170" cy="101" r="13" fill="none" stroke="#ffffff" stroke-width="3"/>
+  <path d="M145 142 Q170 112 195 142 M170 114 V158 M150 174 L170 158 L190 174" fill="none" stroke="#ffffff" stroke-width="3"/>
+  <text x="170" y="190" class="name">Telemetry operator</text>
+
+  <!-- External system -->
+  <rect x="40" y="405" width="260" height="145" rx="5" fill="#999999"/>
+  <text x="170" y="438" class="name">Telemetry pipeline</text>
+  <text x="170" y="460" class="type">[External software system]</text>
+  <text x="170" y="492" class="description">
+    <tspan x="170" dy="0">Receiver, processors, and</tspan>
+    <tspan x="170" dy="20">exporter under test</tspan>
+  </text>
+
+  <!-- System of interest -->
+  <rect x="465" y="225" width="350" height="185" rx="5" fill="#1168bd"/>
+  <text x="640" y="263" class="name">MDAI Fidelity Validator</text>
+  <text x="640" y="286" class="type">[Software system]</text>
+  <text x="640" y="322" class="description">
+    <tspan x="640" dy="0">Correlates ingress and egress observations,</tspan>
+    <tspan x="640" dy="21">evaluates canonical and policy fidelity,</tspan>
+    <tspan x="640" dy="21">and exposes results and metrics</tspan>
+  </text>
+
+  <!-- External system -->
+  <rect x="930" y="245" width="240" height="145" rx="5" fill="#999999"/>
+  <text x="1050" y="280" class="name">Prometheus</text>
+  <text x="1050" y="303" class="type">[External software system]</text>
+  <text x="1050" y="336" class="description">
+    <tspan x="1050" dy="0">Scrapes fidelity metrics</tspan>
+    <tspan x="1050" dy="20">and evaluates alerts</tspan>
+  </text>
+
+  <!-- Operator to validator: upper orthogonal route -->
+  <path class="line" d="M300 142 H385 V270 H465"/>
+  <rect x="308" y="95" width="160" height="42" rx="3" class="label-bg"/>
+  <text x="388" y="112" class="relationship">Inspects comparisons</text>
+  <text x="388" y="129" class="protocol">[HTTP/JSON]</text>
+
+  <!-- Pipeline to validator: lower orthogonal route -->
+  <path class="line" d="M300 478 H385 V365 H465"/>
+  <rect x="303" y="486" width="170" height="44" rx="3" class="label-bg"/>
+  <text x="388" y="503" class="relationship">Sends both observations</text>
+  <text x="388" y="520" class="protocol">[Datadog HTTP]</text>
+
+  <!-- Validator to Prometheus: direct route -->
+  <path class="line" d="M815 318 H930"/>
+  <rect x="823" y="266" width="100" height="43" rx="3" class="label-bg"/>
+  <text x="873" y="283" class="relationship">Exposes metrics</text>
+  <text x="873" y="300" class="protocol">[HTTP /metrics]</text>
+
+  <!-- Minimal notation -->
+  <rect x="465" y="565" width="16" height="16" rx="2" fill="#1168bd"/>
+  <text x="489" y="578" class="protocol" text-anchor="start">System of interest</text>
+  <rect x="635" y="565" width="16" height="16" rx="2" fill="#999999"/>
+  <text x="659" y="578" class="protocol" text-anchor="start">External system</text>
+</svg>

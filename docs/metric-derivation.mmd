@@ -1,0 +1,16 @@
+flowchart TD
+    Pair["Completed receiver/exporter item pair"] --> Canonical["Normalize canonical mapped fields"]
+    Canonical --> Union["Sorted union of canonical keys"]
+    Union --> APass["equal on both sides<br/>attribute_checks{result=pass}++"]
+    Union --> AFail["mismatch or missing<br/>attribute_checks{result=fail}++"]
+    APass --> FullDecision{"No top-level deltas<br/>and all spans pass?"}
+    AFail --> FullDecision
+    Spans["Trace spans matched by span_id"] --> FullDecision
+    FullDecision -- yes --> SPass["signal_checks{result=pass}++"]
+    FullDecision -- no --> SFail["signal_checks{result=fail}++"]
+
+    Pair --> PolicyEval["Evaluate each policy attribute"]
+    PolicyEval --> RAttr["required_attribute_checks<br/>one increment per rule"]
+    RAttr --> ReqDecision{"Every rule passes?"}
+    ReqDecision -- yes --> RSPass["required_signal_checks{result=pass}++"]
+    ReqDecision -- no --> RSFail["required_signal_checks{result=fail}++"]
