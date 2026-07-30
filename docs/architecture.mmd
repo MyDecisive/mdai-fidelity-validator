@@ -1,0 +1,27 @@
+%% mdai-fidelity-validator architecture and metric derivation
+
+flowchart LR
+    Receiver["Receiver-side mirror<br/>Datadog intake"] --> R8126[":8126 receiver capture"]
+    Exporter["Exporter-side mirror<br/>Datadog API payload"] --> E18081[":18081 exporter capture"]
+    Synthetic["Synthetic client"] --> Admin[":8080 /observe/..."]
+
+    R8126 --> Capture["Capture + classify<br/>request count"]
+    E18081 --> Capture
+    Admin --> Capture
+    Capture --> Decode["Decompress + decode<br/>JSON / MessagePack / protobuf"]
+    Decode --> Split["Split natural groups<br/>trace / series / log correlation"]
+    Split --> Flatten["Flatten wire fields"]
+    Flatten --> Mapping["Canonical field mapping<br/>YAML + transforms"]
+    Mapping --> Correlate["Resolve correlation key<br/>signal:value"]
+    Correlate --> Pending{"Opposite side<br/>already pending?"}
+    Pending -- no --> Store["In-memory pending map<br/>retention + GC"]
+    Pending -- yes --> Compare["Compare pair"]
+    Store -. later counterpart .-> Pending
+
+    Policy["Fidelity policy YAML"] --> Required["Required-policy evaluation"]
+    Compare --> Full["Canonical full-payload diff<br/>+ trace span diff"]
+    Compare --> Required
+    Full --> Result["ComparisonResult<br/>admin API + structured log"]
+    Required --> Result
+    Full --> Metrics[":8888 Prometheus metrics"]
+    Required --> Metrics
