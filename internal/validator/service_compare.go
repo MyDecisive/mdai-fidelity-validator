@@ -7,9 +7,7 @@ import (
 	"time"
 )
 
-func comparePair(a, b *observedPayload, policy Policy) ComparisonResult {
-	receiver := a
-	exporter := b
+func comparePair(receiver, exporter *observedPayload, policy Policy) ComparisonResult {
 	if receiver.source != "receiver" {
 		receiver, exporter = exporter, receiver
 	}
@@ -77,17 +75,14 @@ func comparePair(a, b *observedPayload, policy Policy) ComparisonResult {
 }
 
 func mergeAndSortKeys(a, b map[string]string) []string {
-	allKeys := make(map[string]struct{}, len(a)+len(b))
+	keys := make([]string, 0, len(a))
 	for key := range a {
-		allKeys[key] = struct{}{}
+		keys = append(keys, key)
 	}
 	for key := range b {
-		allKeys[key] = struct{}{}
-	}
-
-	keys := make([]string, 0, len(allKeys))
-	for key := range allKeys {
-		keys = append(keys, key)
+		if _, found := a[key]; !found {
+			keys = append(keys, key)
+		}
 	}
 	slices.Sort(keys)
 	return keys
