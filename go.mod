@@ -1,21 +1,18 @@
 module github.com/mydecisive/mdai-fidelity-validator
 
-go 1.25.0
-
-require (
-	github.com/prometheus/client_golang v1.23.2
-	github.com/stretchr/testify v1.11.1
-	gopkg.in/yaml.v3 v3.0.1
-)
+go 1.26.7
 
 require (
 	github.com/DataDog/agent-payload/v5 v5.0.185
 	github.com/DataDog/datadog-agent/pkg/proto v0.79.2
 	github.com/gogo/protobuf v1.3.2
 	github.com/klauspost/compress v1.18.4
+	github.com/prometheus/client_golang v1.23.2
 	github.com/prometheus/client_model v0.6.2
+	github.com/stretchr/testify v1.11.1
 	github.com/vmihailenco/msgpack/v5 v5.4.1
 	go.uber.org/zap v1.27.1
+	gopkg.in/yaml.v3 v3.0.1
 )
 
 require (
